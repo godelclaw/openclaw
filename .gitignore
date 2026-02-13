@@ -84,5 +84,5 @@ USER.md
 !.agent/workflows/
 local/
 
-# Local godseed runtime state
-.godseed-state/
+# Local BGIseed runtime state
+.BGIseed-state/

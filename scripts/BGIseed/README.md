@@ -1,6 +1,6 @@
 # Godseed Bring-Up
 
-State/config is isolated under `.godseed-state/` in the repo root.
+State/config is isolated under `.BGIseed-state/` in the repo root.
 
 ## One-time toolchain
 
@@ -24,12 +24,12 @@ pnpm install
 ## Run
 
 1. Core startup check (no channels):
-   `scripts/godseed/run-core-skip-channels.sh`
+   `scripts/BGIseed/run-core-skip-channels.sh`
 2. Full startup with configured channels:
-   `scripts/godseed/run-core.sh`
+   `scripts/BGIseed/run-core.sh`
 
 ## Notes
 
 - Token pressure is reduced via small bootstrap files, reduced history limits, no bundled skills, disabled control UI/browser/canvas.
 - Secrets are loaded from `~/.openclaw/.env` (OPENROUTER_API_KEY, TELEGRAM_BOT_TOKEN, etc.)
-- Gateway auth token is configured in `.godseed-state/openclaw.json`.
+- Gateway auth token is configured in `.BGIseed-state/openclaw.json`.

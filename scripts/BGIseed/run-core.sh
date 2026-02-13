@@ -2,8 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-export OPENCLAW_STATE_DIR="$ROOT/.godseed-state"
-export OPENCLAW_SKIP_CHANNELS=1
+export OPENCLAW_STATE_DIR="$ROOT/.BGIseed-state"
 export OPENCLAW_SKIP_GMAIL_WATCHER=1
 
 if [ -s "$HOME/.nvm/nvm.sh" ]; then
