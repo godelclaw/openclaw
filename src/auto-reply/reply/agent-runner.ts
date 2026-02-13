@@ -19,6 +19,7 @@ import {
   updateSessionStoreEntry,
 } from "../../config/sessions.js";
 import { emitDiagnosticEvent, isDiagnosticsEnabled } from "../../infra/diagnostic-events.js";
+import { formatGasAlertMessage, refreshAgentGasStatus } from "../../infra/gas.js";
 import { defaultRuntime } from "../../runtime.js";
 import { estimateUsageCost, resolveModelCostConfig } from "../../utils/usage-format.js";
 import { resolveResponseUsageMode, type VerboseLevel } from "../thinking.js";
@@ -395,10 +396,21 @@ export async function runReplyAgent(params: {
       cliSessionId,
     });
 
+    const gasUpdate = !isHeartbeat
+      ? await refreshAgentGasStatus({
+          cfg,
+          agentId: followupRun.run.agentId,
+        })
+      : null;
+    const gasAlertText = formatGasAlertMessage(gasUpdate?.alerts);
+
     // Drain any late tool/block deliveries before deciding there's "nothing to send".
     // Otherwise, a late typing trigger (e.g. from a tool callback) can outlive the run and
     // keep the typing indicator stuck.
     if (payloadArray.length === 0) {
+      if (gasAlertText) {
+        return finalizeWithFollowup({ text: gasAlertText }, queueKey, runFollowupTurn);
+      }
       return finalizeWithFollowup(undefined, queueKey, runFollowupTurn);
     }
 
@@ -422,6 +434,9 @@ export async function runReplyAgent(params: {
     didLogHeartbeatStrip = payloadResult.didLogHeartbeatStrip;
 
     if (replyPayloads.length === 0) {
+      if (gasAlertText) {
+        return finalizeWithFollowup({ text: gasAlertText }, queueKey, runFollowupTurn);
+      }
       return finalizeWithFollowup(undefined, queueKey, runFollowupTurn);
     }
 
@@ -511,6 +526,9 @@ export async function runReplyAgent(params: {
     }
     if (responseUsageLine) {
       finalPayloads = appendUsageLine(finalPayloads, responseUsageLine);
+    }
+    if (gasAlertText) {
+      finalPayloads = [{ text: gasAlertText }, ...finalPayloads];
     }
 
     return finalizeWithFollowup(

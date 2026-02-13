@@ -197,6 +197,7 @@ export async function runAgentTurnWithFallback(params: {
                   ownerNumbers: params.followupRun.run.ownerNumbers,
                   cliSessionId,
                   images: params.opts?.images,
+                  mcpServers: params.opts?.mcpServers,
                 });
 
                 // CLI backends don't emit streaming assistant events, so we need to
@@ -313,6 +314,7 @@ export async function runAgentTurnWithFallback(params: {
             timeoutMs: params.followupRun.run.timeoutMs,
             runId,
             images: params.opts?.images,
+            mcpServers: params.opts?.mcpServers,
             abortSignal: params.opts?.abortSignal,
             blockReplyBreak: params.resolvedBlockStreamingBreak,
             blockReplyChunking: params.blockReplyChunking,

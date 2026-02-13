@@ -20,6 +20,8 @@ export const TOOL_GROUPS: Record<string, string[]> = {
   "group:fs": ["read", "write", "edit", "apply_patch"],
   // Host/runtime execution tools
   "group:runtime": ["exec", "process"],
+  // Lean theorem proving helper
+  "group:lean": ["lean"],
   // Session management tools
   "group:sessions": [
     "sessions_list",
@@ -55,6 +57,7 @@ export const TOOL_GROUPS: Record<string, string[]> = {
     "web_search",
     "web_fetch",
     "image",
+    "lean",
   ],
 };
 
@@ -65,7 +68,7 @@ const TOOL_PROFILES: Record<ToolProfileId, ToolProfilePolicy> = {
     allow: ["session_status"],
   },
   coding: {
-    allow: ["group:fs", "group:runtime", "group:sessions", "group:memory", "image"],
+    allow: ["group:fs", "group:runtime", "group:lean", "group:sessions", "group:memory", "image"],
   },
   messaging: {
     allow: [

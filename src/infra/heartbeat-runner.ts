@@ -40,6 +40,7 @@ import { CommandLane } from "../process/lanes.js";
 import { normalizeAgentId, toAgentStoreSessionKey } from "../routing/session-key.js";
 import { defaultRuntime, type RuntimeEnv } from "../runtime.js";
 import { formatErrorMessage } from "./errors.js";
+import { formatGasAlertMessage, refreshAgentGasStatus } from "./gas.js";
 import { isWithinActiveHours } from "./heartbeat-active-hours.js";
 import { emitHeartbeatEvent, resolveIndicatorType } from "./heartbeat-events.js";
 import { resolveHeartbeatVisibility } from "./heartbeat-visibility.js";
@@ -425,6 +426,8 @@ export async function runHeartbeatOnce(opts: {
     return { status: "skipped", reason: "requests-in-flight" };
   }
 
+  const gasUpdate = await refreshAgentGasStatus({ cfg, agentId });
+
   // Skip heartbeat if HEARTBEAT.md exists but has no actionable content.
   // This saves API calls/costs when the file is effectively empty (only comments/headers).
   // EXCEPTION: Don't skip for exec events or cron events - they have pending system events
@@ -481,6 +484,7 @@ export async function runHeartbeatOnce(opts: {
     channel: delivery.channel !== "none" ? delivery.channel : undefined,
     accountId: delivery.accountId,
   }).responsePrefix;
+  const gasAlertText = formatGasAlertMessage(gasUpdate?.alerts);
 
   // Check if this is an exec event or cron event with pending system events.
   // If so, use a specialized prompt that instructs the model to relay the result
@@ -511,6 +515,21 @@ export async function runHeartbeatOnce(opts: {
       accountId: delivery.accountId,
     });
     return { status: "skipped", reason: "alerts-disabled" };
+  }
+
+  if (gasAlertText && visibility.showAlerts && delivery.channel !== "none" && delivery.to) {
+    try {
+      await deliverOutboundPayloads({
+        cfg,
+        channel: delivery.channel,
+        to: delivery.to,
+        accountId: delivery.accountId,
+        payloads: [{ text: gasAlertText }],
+        deps: opts.deps,
+      });
+    } catch (err) {
+      log.warn("heartbeat: failed to deliver gas alert");
+    }
   }
 
   const heartbeatOkText = responsePrefix ? `${responsePrefix} ${HEARTBEAT_TOKEN}` : HEARTBEAT_TOKEN;

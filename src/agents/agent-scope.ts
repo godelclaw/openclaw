@@ -21,7 +21,9 @@ type ResolvedAgentConfig = {
   skills?: AgentEntry["skills"];
   memorySearch?: AgentEntry["memorySearch"];
   humanDelay?: AgentEntry["humanDelay"];
+  gas?: AgentEntry["gas"];
   heartbeat?: AgentEntry["heartbeat"];
+  mcpServers?: AgentEntry["mcpServers"];
   identity?: AgentEntry["identity"];
   groupChat?: AgentEntry["groupChat"];
   subagents?: AgentEntry["subagents"];
@@ -115,7 +117,9 @@ export function resolveAgentConfig(
     skills: Array.isArray(entry.skills) ? entry.skills : undefined,
     memorySearch: entry.memorySearch,
     humanDelay: entry.humanDelay,
+    gas: entry.gas,
     heartbeat: entry.heartbeat,
+    mcpServers: Array.isArray(entry.mcpServers) ? entry.mcpServers : undefined,
     identity: entry.identity,
     groupChat: entry.groupChat,
     subagents: typeof entry.subagents === "object" && entry.subagents ? entry.subagents : undefined,
@@ -134,6 +138,21 @@ export function resolveAgentSkillsFilter(
   }
   const normalized = raw.map((entry) => String(entry).trim()).filter(Boolean);
   return normalized.length > 0 ? normalized : [];
+}
+
+export function resolveAgentMcpServers(
+  cfg: OpenClawConfig,
+  agentId: string,
+): unknown[] | undefined {
+  const defaults = cfg.agents?.defaults?.mcpServers;
+  const overrides = resolveAgentConfig(cfg, agentId)?.mcpServers;
+  if (Array.isArray(overrides)) {
+    return overrides;
+  }
+  if (Array.isArray(defaults)) {
+    return defaults;
+  }
+  return undefined;
 }
 
 export function resolveAgentModelPrimary(cfg: OpenClawConfig, agentId: string): string | undefined {

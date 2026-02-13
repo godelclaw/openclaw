@@ -128,6 +128,8 @@ export type AgentDefaultsConfig = {
   contextTokens?: number;
   /** Optional CLI backends for text-only fallback (claude-cli, etc.). */
   cliBackends?: Record<string, CliBackendConfig>;
+  /** Optional MCP server list (ACP mcpServers shape) for CLI and embedded runners. */
+  mcpServers?: unknown[];
   /** Opt-in: prune old tool results from the LLM context to reduce token usage. */
   contextPruning?: AgentContextPruningConfig;
   /** Compaction tuning and pre-compaction memory flush behavior. */
@@ -197,6 +199,25 @@ export type AgentDefaultsConfig = {
      * Default: false (only the final heartbeat payload is delivered).
      */
     includeReasoning?: boolean;
+  };
+  /** Soft budget awareness using provider spend data (currently OpenRouter). */
+  gas?: {
+    /** Enable gas tracking for this agent (default: true when any quota is set). */
+    enabled?: boolean;
+    /** Daily soft quota in USD. */
+    dailyUsd?: number;
+    /** Weekly soft quota in USD. */
+    weeklyUsd?: number;
+    /** Monthly soft quota in USD. */
+    monthlyUsd?: number;
+    /** Alert thresholds as percentages (1-100). Default: [50, 75, 90, 100]. */
+    thresholds?: number[];
+    alerts?: {
+      /** Enable threshold-crossing alerts (default: true). */
+      enabled?: boolean;
+      /** Periods that can emit alerts. Default: ["daily", "weekly", "monthly"]. */
+      periods?: Array<"daily" | "weekly" | "monthly">;
+    };
   };
   /** Max concurrent agent runs across all conversations. Default: 1 (sequential). */
   maxConcurrent?: number;

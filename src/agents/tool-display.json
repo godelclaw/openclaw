@@ -303,6 +303,14 @@
         "start": { "label": "start" },
         "wait": { "label": "wait" }
       }
+    },
+    "lean": {
+      "emoji": "λ",
+      "title": "Lean",
+      "actions": {
+        "version": { "label": "version" },
+        "check": { "label": "check", "detailKeys": ["filePath", "useLake", "timeoutMs"] }
+      }
     }
   }
 }

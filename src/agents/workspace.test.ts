@@ -2,6 +2,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { makeTempWorkspace, writeWorkspaceFile } from "../test-helpers/workspace.js";
 import {
+  DEFAULT_GAS_FILENAME,
   DEFAULT_MEMORY_ALT_FILENAME,
   DEFAULT_MEMORY_FILENAME,
   loadWorkspaceBootstrapFiles,
@@ -57,5 +58,17 @@ describe("loadWorkspaceBootstrapFiles", () => {
     );
 
     expect(memoryEntries).toHaveLength(0);
+  });
+
+  it("includes GAS.md when present", async () => {
+    const tempDir = await makeTempWorkspace("openclaw-workspace-");
+    await writeWorkspaceFile({ dir: tempDir, name: "GAS.md", content: "budget" });
+
+    const files = await loadWorkspaceBootstrapFiles(tempDir);
+    const gasEntry = files.find((file) => file.name === DEFAULT_GAS_FILENAME);
+
+    expect(gasEntry).toBeDefined();
+    expect(gasEntry?.missing).toBe(false);
+    expect(gasEntry?.content).toBe("budget");
   });
 });

@@ -32,6 +32,10 @@ export type AgentConfig = {
   humanDelay?: HumanDelayConfig;
   /** Optional per-agent heartbeat overrides. */
   heartbeat?: AgentDefaultsConfig["heartbeat"];
+  /** Optional per-agent gas/budget overrides. */
+  gas?: AgentDefaultsConfig["gas"];
+  /** Optional per-agent MCP server overrides. */
+  mcpServers?: AgentDefaultsConfig["mcpServers"];
   identity?: IdentityConfig;
   groupChat?: GroupChatConfig;
   subagents?: {

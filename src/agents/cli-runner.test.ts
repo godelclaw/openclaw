@@ -63,6 +63,73 @@ describe("runCliAgent resume cleanup", () => {
     expect(pkillArgs[1]).toContain("thread-123");
   });
 
+  it("injects ACP mcpServers for claude-cli runs", async () => {
+    runExecMock.mockResolvedValue({ stdout: "", stderr: "" });
+
+    let mcpConfigPath = "";
+    runCommandWithTimeoutMock.mockImplementationOnce(async (argv: string[]) => {
+      expect(argv).toContain("--strict-mcp-config");
+      const mcpConfigFlag = argv.indexOf("--mcp-config");
+      expect(mcpConfigFlag).toBeGreaterThan(-1);
+      mcpConfigPath = argv[mcpConfigFlag + 1] as string;
+      const parsed = JSON.parse(await fs.readFile(mcpConfigPath, "utf8"));
+      expect(parsed).toEqual({
+        mcpServers: {
+          "lean-lsp": {
+            type: "stdio",
+            command: "lean-lsp-mcp",
+            args: ["--stdio"],
+            env: {
+              LEAN_PATH: "/tmp/lean",
+            },
+          },
+          wiki: {
+            type: "sse",
+            url: "https://example.com/mcp-sse",
+            headers: {
+              Authorization: "Bearer test",
+            },
+          },
+        },
+      });
+      return {
+        stdout: JSON.stringify({ message: "ok", session_id: "sid-1" }),
+        stderr: "",
+        code: 0,
+        signal: null,
+        killed: false,
+      };
+    });
+
+    await runCliAgent({
+      sessionId: "s1",
+      sessionFile: "/tmp/session.jsonl",
+      workspaceDir: "/tmp",
+      prompt: "hi",
+      provider: "claude-cli",
+      model: "opus",
+      timeoutMs: 1_000,
+      runId: "run-mcp-1",
+      mcpServers: [
+        {
+          name: "lean-lsp",
+          command: "lean-lsp-mcp",
+          args: ["--stdio"],
+          env: [{ name: "LEAN_PATH", value: "/tmp/lean" }],
+        },
+        {
+          type: "sse",
+          name: "wiki",
+          url: "https://example.com/mcp-sse",
+          headers: [{ name: "Authorization", value: "Bearer test" }],
+        },
+      ],
+    });
+
+    expect(runCommandWithTimeoutMock).toHaveBeenCalledTimes(1);
+    await expect(fs.access(mcpConfigPath)).rejects.toThrow();
+  });
+
   it("falls back to per-agent workspace when workspaceDir is missing", async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-cli-runner-"));
     const fallbackWorkspace = path.join(tempDir, "workspace-main");

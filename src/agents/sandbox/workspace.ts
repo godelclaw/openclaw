@@ -3,6 +3,7 @@ import path from "node:path";
 import { resolveUserPath } from "../../utils.js";
 import {
   DEFAULT_AGENTS_FILENAME,
+  DEFAULT_GAS_FILENAME,
   DEFAULT_BOOTSTRAP_FILENAME,
   DEFAULT_HEARTBEAT_FILENAME,
   DEFAULT_IDENTITY_FILENAME,
@@ -28,6 +29,7 @@ export async function ensureSandboxWorkspace(
       DEFAULT_USER_FILENAME,
       DEFAULT_BOOTSTRAP_FILENAME,
       DEFAULT_HEARTBEAT_FILENAME,
+      DEFAULT_GAS_FILENAME,
     ];
     for (const name of files) {
       const src = path.join(seed, name);
