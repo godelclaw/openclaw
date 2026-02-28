@@ -197,6 +197,23 @@ function buildChatCommands(): ChatCommandDefinition[] {
       category: "status",
     }),
     defineChatCommand({
+      key: "memory-refine",
+      nativeName: "memory_refine",
+      description: "Run offline memory maintenance (dedupe/date-fill; optional embed).",
+      textAliases: ["/memory-refine", "/memory_refine"],
+      acceptsArgs: true,
+      args: [
+        {
+          name: "options",
+          description: "Optional: --embed",
+          type: "string",
+          required: false,
+          captureRemaining: true,
+        },
+      ],
+      category: "status",
+    }),
+    defineChatCommand({
       key: "allowlist",
       description: "List/add/remove allowlist entries.",
       textAlias: "/allowlist",

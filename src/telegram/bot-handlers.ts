@@ -27,10 +27,12 @@ import { resolveAgentRoute } from "../routing/resolve-route.js";
 import { resolveThreadSessionKeys } from "../routing/session-key.js";
 import {
   runVeriCoreMemoryQuery,
+  runVeriCoreMemoryRefine,
   runVeriCoreMemoryStatus,
   runVeriCoreStimulusRoute,
   runVeriCoreStimulusRun,
   type VeriCoreMemoryQueryResult,
+  type VeriCoreMemoryRefineResult,
   type VeriCoreMemoryStatus,
   type VeriCoreRoutePreference,
 } from "../vericore/impetus.js";
@@ -106,6 +108,18 @@ function isMemoryQueryCommand(command?: string | null): boolean {
   );
 }
 
+function isMemoryRefineCommand(command?: string | null): boolean {
+  if (!command) {
+    return false;
+  }
+  const normalized = command.trim().toLowerCase();
+  return (
+    normalized === "memory-refine" ||
+    normalized === "memory_refine" ||
+    normalized === "memoryrefine"
+  );
+}
+
 function parseMemoryQueryText(text?: string): string {
   const body = (text ?? "").trim();
   if (!body.startsWith("/")) {
@@ -118,6 +132,14 @@ function parseMemoryQueryText(text?: string): string {
   return body.slice(firstSpace + 1).trim();
 }
 
+function parseMemoryRefineEmbedFlag(text?: string): boolean {
+  const body = parseMemoryQueryText(text);
+  if (!body) {
+    return false;
+  }
+  return /(^|\s)(--embed|embed)(\s|$)/i.test(body);
+}
+
 function formatMemoryStatusMessage(status: VeriCoreMemoryStatus): string {
   const byTier = Object.entries(status.memory.by_tier)
     .map(([tier, count]) => `${tier}: ${count}`)
@@ -126,11 +148,16 @@ function formatMemoryStatusMessage(status: VeriCoreMemoryStatus): string {
     .map(([kind, count]) => `${kind}: ${count}`)
     .join(", ");
 
+  const missingEmbeddings = status.memory.missing_embeddings ?? 0;
+  const missingSourceDates = status.memory.missing_source_dates ?? 0;
+
   return [
     "VeriCore memory status:",
     `- items: ${status.memory.total_items}`,
     `- by tier: ${byTier || "(none)"}`,
     `- by type: ${byType || "(none)"}`,
+    `- missing embeddings: ${missingEmbeddings}`,
+    `- missing source dates: ${missingSourceDates}`,
     `- memory file: ${status.memory.file}`,
     `- history root: ${status.history.root}`,
     `- history daily/week/merged: ${status.history.daily_files}/${status.history.weekly_files}/${status.history.daily_merged_files}`,
@@ -153,6 +180,18 @@ function formatMemoryQueryMessage(result: VeriCoreMemoryQueryResult): string {
     `- tier: ${result.tier}`,
     `- hits: ${result.hits.length}`,
     ...lines,
+  ].join("\n");
+}
+
+function formatMemoryRefineMessage(result: VeriCoreMemoryRefineResult): string {
+  return [
+    "VeriCore memory refine complete:",
+    `- items before/after: ${result.refine.before_items} -> ${result.refine.after_items}`,
+    `- removed (dedupe): ${result.refine.removed_items}`,
+    `- merged groups: ${result.refine.merged_groups}`,
+    `- source dates filled: ${result.refine.source_dates_filled}`,
+    `- embedded items: ${result.refine.embedded_items} (requested: ${result.refine.embed_requested ? "yes" : "no"})`,
+    `- total items now: ${result.memory.total_items}`,
   ].join("\n");
 }
 
@@ -479,6 +518,19 @@ export const registerTelegramHandlers = ({
           return;
         } catch (err) {
           runtime.error?.(warn(`vericore memory_status error (falling back): ${String(err)}`));
+          await params.onFallback();
+          return;
+        }
+      }
+
+      if (isMemoryRefineCommand(route.command)) {
+        try {
+          const embed = parseMemoryRefineEmbedFlag(params.msg.text ?? params.msg.caption ?? "");
+          const result = await runVeriCoreMemoryRefine(embed);
+          await sendVeriCoreDriverResponse(params.msg, formatMemoryRefineMessage(result));
+          return;
+        } catch (err) {
+          runtime.error?.(warn(`vericore memory_refine error (falling back): ${String(err)}`));
           await params.onFallback();
           return;
         }
