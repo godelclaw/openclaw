@@ -86,7 +86,10 @@ describe("enableConsoleCapture", () => {
     console.warn("[EventQueue] Slow listener detected");
     expect(warn).toHaveBeenCalledTimes(1);
     const firstArg = String(warn.mock.calls[0]?.[0] ?? "");
-    expect(firstArg.startsWith("2026-01-17T18:01:02.000Z [EventQueue]")).toBe(true);
+    // Timestamp uses local time with timezone offset instead of UTC "Z" suffix
+    expect(firstArg).toMatch(
+      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{2}:\d{2} \[EventQueue\]/,
+    );
     vi.useRealTimers();
   });
 
@@ -122,20 +125,15 @@ describe("enableConsoleCapture", () => {
     expect(log).toHaveBeenCalledWith(payload);
   });
 
-  it("swallows async EPIPE on stdout", () => {
+  it.each([
+    { name: "stdout", stream: process.stdout },
+    { name: "stderr", stream: process.stderr },
+  ])("swallows async EPIPE on $name", ({ stream }) => {
     setLoggerOverride({ level: "info", file: tempLogPath() });
     enableConsoleCapture();
     const epipe = new Error("write EPIPE") as NodeJS.ErrnoException;
     epipe.code = "EPIPE";
-    expect(() => process.stdout.emit("error", epipe)).not.toThrow();
-  });
-
-  it("swallows async EPIPE on stderr", () => {
-    setLoggerOverride({ level: "info", file: tempLogPath() });
-    enableConsoleCapture();
-    const epipe = new Error("write EPIPE") as NodeJS.ErrnoException;
-    epipe.code = "EPIPE";
-    expect(() => process.stderr.emit("error", epipe)).not.toThrow();
+    expect(() => stream.emit("error", epipe)).not.toThrow();
   });
 
   it("rethrows non-EPIPE errors on stdout", () => {
