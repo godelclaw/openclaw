@@ -1,0 +1,986 @@
+use std::collections::HashMap;
+use std::fs;
+use std::path::{Component, Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::config::{Config, StringList, TimeWindow};
+use crate::types::{Action, Channel, ContextTier, Verdict};
+
+/// Filesystem layout:
+///
+///   /home/zarclaw/              <- home_root (Public by default)
+///   /home/zarclaw/private/      <- explicit Private carveout
+///   /home/zarclaw/family/       <- explicit Family carveout
+///
+/// Additional policy:
+/// - dot-prefixed paths are private by default (configurable)
+/// - additive private prefixes can be explicitly listed
+/// - additive family prefixes can be explicitly listed
+///
+/// Tier resolution order:
+///   1) outside home_root => denied
+///   2) explicit private carveout => Private
+///   3) additive private prefixes => Private
+///   4) dot paths (if enabled) => Private
+///   5) explicit family carveout => Family
+///   6) additive family prefixes => Family
+///   7) everything else under home_root => Public
+#[derive(Debug, Clone)]
+pub struct ContextRoots {
+    pub home_root: PathBuf,
+    pub private: PathBuf,
+    pub family: PathBuf,
+    private_prefixes: Vec<PathBuf>,
+    family_prefixes: Vec<PathBuf>,
+    dot_paths_private: bool,
+}
+
+impl ContextRoots {
+    pub fn new(
+        home_root: impl AsRef<Path>,
+        private: impl AsRef<Path>,
+        family: impl AsRef<Path>,
+    ) -> Result<Self, String> {
+        let home_root = canonicalize_dir(home_root.as_ref())?;
+        let private = canonicalize_dir(private.as_ref())?;
+        let family = canonicalize_dir(family.as_ref())?;
+
+        if !private.starts_with(&home_root) {
+            return Err(format!(
+                "private root '{}' must be under home '{}'",
+                private.display(),
+                home_root.display()
+            ));
+        }
+        if !family.starts_with(&home_root) {
+            return Err(format!(
+                "family root '{}' must be under home '{}'",
+                family.display(),
+                home_root.display()
+            ));
+        }
+        if private.starts_with(&family) || family.starts_with(&private) {
+            return Err(format!(
+                "private and family roots must not overlap: '{}', '{}'",
+                private.display(),
+                family.display()
+            ));
+        }
+
+        Ok(Self {
+            home_root,
+            private,
+            family,
+            private_prefixes: Vec::new(),
+            family_prefixes: Vec::new(),
+            dot_paths_private: true,
+        })
+    }
+
+    pub fn with_private_prefixes(mut self, prefixes: Vec<PathBuf>) -> Result<Self, String> {
+        let mut canonical = Vec::new();
+        for prefix in prefixes {
+            let c = canonicalize_dir(&prefix)?;
+            if !c.starts_with(&self.home_root) {
+                return Err(format!(
+                    "private prefix '{}' must be under home '{}'",
+                    c.display(),
+                    self.home_root.display()
+                ));
+            }
+            if c == self.home_root {
+                return Err("home root cannot be marked as private prefix".into());
+            }
+            if c.starts_with(&self.family) || self.family.starts_with(&c) {
+                return Err(format!(
+                    "private prefix '{}' overlaps with family root '{}'",
+                    c.display(),
+                    self.family.display()
+                ));
+            }
+            canonical.push(c);
+        }
+        self.private_prefixes = canonical;
+        Ok(self)
+    }
+
+    pub fn with_family_prefixes(mut self, prefixes: Vec<PathBuf>) -> Result<Self, String> {
+        let mut canonical = Vec::new();
+        for prefix in prefixes {
+            let c = canonicalize_dir(&prefix)?;
+            if !c.starts_with(&self.home_root) {
+                return Err(format!(
+                    "family prefix '{}' must be under home '{}'",
+                    c.display(),
+                    self.home_root.display()
+                ));
+            }
+            if c == self.home_root {
+                return Err("home root cannot be marked as family prefix".into());
+            }
+            if c.starts_with(&self.private) || self.private.starts_with(&c) {
+                return Err(format!(
+                    "family prefix '{}' overlaps with private root '{}'",
+                    c.display(),
+                    self.private.display()
+                ));
+            }
+            if self
+                .private_prefixes
+                .iter()
+                .any(|p| c.starts_with(p) || p.starts_with(&c))
+            {
+                return Err(format!(
+                    "family prefix '{}' overlaps with private prefix",
+                    c.display()
+                ));
+            }
+            canonical.push(c);
+        }
+        self.family_prefixes = canonical;
+        Ok(self)
+    }
+
+    pub fn with_dot_paths_private(mut self, enabled: bool) -> Self {
+        self.dot_paths_private = enabled;
+        self
+    }
+
+    pub fn tier_for_path(&self, path: &Path) -> Option<ContextTier> {
+        if !path.starts_with(&self.home_root) {
+            return None;
+        }
+        if path.starts_with(&self.private) {
+            return Some(ContextTier::Private);
+        }
+        if self.private_prefixes.iter().any(|p| path.starts_with(p)) {
+            return Some(ContextTier::Private);
+        }
+        if self.dot_paths_private && has_dot_component_within_home(path, &self.home_root) {
+            return Some(ContextTier::Private);
+        }
+        if path.starts_with(&self.family) {
+            return Some(ContextTier::Family);
+        }
+        if self.family_prefixes.iter().any(|p| path.starts_with(p)) {
+            return Some(ContextTier::Family);
+        }
+        Some(ContextTier::Public)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct GatePolicy {
+    roots: ContextRoots,
+    network_allowlist: Vec<String>,
+    allow_exec_in_private: bool,
+    allow_exec_in_family: bool,
+    allow_exec_in_public: bool,
+
+    gate_action_kinds: bool,
+    action_kinds_public: Vec<String>,
+    action_kinds_family: Vec<String>,
+    action_kinds_private: Vec<String>,
+
+    gate_tool_identity: bool,
+    tools_public: Vec<String>,
+    tools_family: Vec<String>,
+    tools_private: Vec<String>,
+
+    gate_skill_identity: bool,
+    skills_public: Vec<String>,
+    skills_family: Vec<String>,
+    skills_private: Vec<String>,
+
+    enforce_control_commands: bool,
+    control_public: Vec<String>,
+    control_family: Vec<String>,
+    control_private: Vec<String>,
+
+    channel_map: HashMap<Channel, ContextTier>,
+
+    utc_offset: i32,
+    schedule_public: Option<TimeWindow>,
+    schedule_family: Option<TimeWindow>,
+    schedule_private: Option<TimeWindow>,
+}
+
+impl GatePolicy {
+    pub fn new(roots: ContextRoots, network_allowlist: Vec<String>) -> Self {
+        Self {
+            roots,
+            network_allowlist,
+            allow_exec_in_private: false,
+            allow_exec_in_family: false,
+            allow_exec_in_public: false,
+            gate_action_kinds: false,
+            action_kinds_public: Vec::new(),
+            action_kinds_family: Vec::new(),
+            action_kinds_private: Vec::new(),
+            gate_tool_identity: false,
+            tools_public: Vec::new(),
+            tools_family: Vec::new(),
+            tools_private: Vec::new(),
+            gate_skill_identity: false,
+            skills_public: Vec::new(),
+            skills_family: Vec::new(),
+            skills_private: Vec::new(),
+            enforce_control_commands: true,
+            control_public: vec!["*".to_string()],
+            control_family: vec!["*".to_string()],
+            control_private: vec!["*".to_string()],
+            channel_map: HashMap::new(),
+            utc_offset: 0,
+            schedule_public: None,
+            schedule_family: None,
+            schedule_private: None,
+        }
+    }
+
+    /// Build policy from a loaded Config.
+    pub fn from_config(config: &Config) -> Result<Self, String> {
+        let roots = ContextRoots::new(
+            &config.paths.home_root,
+            &config.paths.private,
+            &config.paths.family,
+        )?;
+
+        let roots = if config.paths.private_prefixes.is_empty() {
+            roots
+        } else {
+            roots.with_private_prefixes(config.paths.private_prefixes.clone())?
+        };
+
+        let roots = if config.paths.family_prefixes.is_empty() {
+            roots
+        } else {
+            roots.with_family_prefixes(config.paths.family_prefixes.clone())?
+        };
+
+        let roots = roots.with_dot_paths_private(config.paths.dot_paths_private);
+
+        let mut channel_map = HashMap::new();
+        for (channel_name, tier_name) in &config.channels.map {
+            let Some(channel) = parse_channel(channel_name) else {
+                return Err(format!("unknown channel in config: '{channel_name}'"));
+            };
+            let Some(tier) = parse_tier(tier_name) else {
+                return Err(format!(
+                    "unknown tier in config for channel '{channel_name}': '{tier_name}'"
+                ));
+            };
+            channel_map.insert(channel, tier);
+        }
+
+        let gate_action_kinds = config
+            .gate
+            .gate_action_kinds
+            .unwrap_or(config.gate.gate_tools);
+
+        let action_kinds_public =
+            list_with_fallback(&config.gate.action_kinds_public, &config.gate.tools_public);
+        let action_kinds_family =
+            list_with_fallback(&config.gate.action_kinds_family, &config.gate.tools_family);
+        let action_kinds_private = list_with_fallback(
+            &config.gate.action_kinds_private,
+            &config.gate.tools_private,
+        );
+
+        Ok(Self {
+            roots,
+            network_allowlist: config.network.allowlist.clone(),
+            allow_exec_in_private: config.exec.allow_in_private,
+            allow_exec_in_family: config.exec.allow_in_family,
+            allow_exec_in_public: config.exec.allow_in_public,
+            gate_action_kinds,
+            action_kinds_public,
+            action_kinds_family,
+            action_kinds_private,
+            gate_tool_identity: config.gate.gate_tool_identity,
+            tools_public: list_only(&config.gate.tool_ids_public),
+            tools_family: list_only(&config.gate.tool_ids_family),
+            tools_private: list_only(&config.gate.tool_ids_private),
+            gate_skill_identity: config.gate.gate_skill_identity,
+            skills_public: list_only(&config.gate.skill_ids_public),
+            skills_family: list_only(&config.gate.skill_ids_family),
+            skills_private: list_only(&config.gate.skill_ids_private),
+            enforce_control_commands: config.control.enforce,
+            control_public: config.control.public.clone(),
+            control_family: config.control.family.clone(),
+            control_private: config.control.private.clone(),
+            channel_map,
+            utc_offset: config.schedule.utc_offset,
+            schedule_public: config.schedule.public.clone(),
+            schedule_family: config.schedule.family.clone(),
+            schedule_private: config.schedule.private.clone(),
+        })
+    }
+
+    pub fn with_exec_in_private(mut self, allow: bool) -> Self {
+        self.allow_exec_in_private = allow;
+        self
+    }
+
+    /// Back-compat helper: this configures primitive action-kind gating.
+    pub fn with_tool_gating(
+        mut self,
+        gate: bool,
+        public: Vec<String>,
+        family: Vec<String>,
+        private: Vec<String>,
+    ) -> Self {
+        self.gate_action_kinds = gate;
+        self.action_kinds_public = public;
+        self.action_kinds_family = family;
+        self.action_kinds_private = private;
+        self
+    }
+
+    pub fn with_tool_identity_gating(
+        mut self,
+        gate: bool,
+        public: Vec<String>,
+        family: Vec<String>,
+        private: Vec<String>,
+    ) -> Self {
+        self.gate_tool_identity = gate;
+        self.tools_public = public;
+        self.tools_family = family;
+        self.tools_private = private;
+        self
+    }
+
+    pub fn with_skill_identity_gating(
+        mut self,
+        gate: bool,
+        public: Vec<String>,
+        family: Vec<String>,
+        private: Vec<String>,
+    ) -> Self {
+        self.gate_skill_identity = gate;
+        self.skills_public = public;
+        self.skills_family = family;
+        self.skills_private = private;
+        self
+    }
+
+    pub fn with_schedule(
+        mut self,
+        utc_offset: i32,
+        public: Option<TimeWindow>,
+        family: Option<TimeWindow>,
+        private: Option<TimeWindow>,
+    ) -> Self {
+        self.utc_offset = utc_offset;
+        self.schedule_public = public;
+        self.schedule_family = family;
+        self.schedule_private = private;
+        self
+    }
+
+    /// Whether exec is allowed for a given context tier (used by tool definitions).
+    pub fn exec_allowed_for(&self, context: ContextTier) -> bool {
+        match context {
+            ContextTier::Private => self.allow_exec_in_private,
+            ContextTier::Family => self.allow_exec_in_family,
+            ContextTier::Public => self.allow_exec_in_public,
+        }
+    }
+
+    pub fn context_for_channel(&self, channel: Channel) -> ContextTier {
+        if let Some(tier) = self.channel_map.get(&channel) {
+            return *tier;
+        }
+
+        match channel {
+            Channel::TelegramPublic | Channel::Api | Channel::Moltbook => ContextTier::Public,
+            Channel::TelegramFamily => ContextTier::Family,
+            Channel::TelegramDm | Channel::Internal | Channel::Terminal => ContextTier::Private,
+        }
+    }
+
+    pub fn check_action_kind(&self, context: ContextTier, action_kind: &str) -> Verdict {
+        if !self.gate_action_kinds {
+            return Verdict::allow();
+        }
+
+        let list = match context {
+            ContextTier::Public => &self.action_kinds_public,
+            ContextTier::Family => &self.action_kinds_family,
+            ContextTier::Private => &self.action_kinds_private,
+        };
+
+        if list_allows(list, action_kind) {
+            Verdict::allow()
+        } else {
+            Verdict::deny(format!(
+                "action kind '{}' not allowed in {:?} context",
+                action_kind, context
+            ))
+        }
+    }
+
+    pub fn check_tool_identity(&self, context: ContextTier, tool_name: Option<&str>) -> Verdict {
+        if !self.gate_tool_identity {
+            return Verdict::allow();
+        }
+
+        let Some(tool_name) = tool_name else {
+            return Verdict::deny("missing tool identity while tool identity gating is enabled");
+        };
+
+        let list = match context {
+            ContextTier::Public => &self.tools_public,
+            ContextTier::Family => &self.tools_family,
+            ContextTier::Private => &self.tools_private,
+        };
+
+        if list_allows(list, tool_name) {
+            Verdict::allow()
+        } else {
+            Verdict::deny(format!(
+                "tool '{}' not allowed in {:?} context",
+                tool_name, context
+            ))
+        }
+    }
+
+    pub fn check_skill_identity(&self, context: ContextTier, skill_name: Option<&str>) -> Verdict {
+        if !self.gate_skill_identity {
+            return Verdict::allow();
+        }
+
+        let Some(skill_name) = skill_name else {
+            return Verdict::deny("missing skill identity while skill identity gating is enabled");
+        };
+
+        let list = match context {
+            ContextTier::Public => &self.skills_public,
+            ContextTier::Family => &self.skills_family,
+            ContextTier::Private => &self.skills_private,
+        };
+
+        if list_allows(list, skill_name) {
+            Verdict::allow()
+        } else {
+            Verdict::deny(format!(
+                "skill '{}' not allowed in {:?} context",
+                skill_name, context
+            ))
+        }
+    }
+
+    pub fn check_control_command(&self, context: ContextTier, command: Option<&str>) -> Verdict {
+        if !self.enforce_control_commands {
+            return Verdict::allow();
+        }
+
+        let Some(command) = command else {
+            return Verdict::deny("missing command while control command verification is enabled");
+        };
+
+        let list = match context {
+            ContextTier::Public => &self.control_public,
+            ContextTier::Family => &self.control_family,
+            ContextTier::Private => &self.control_private,
+        };
+
+        if list_allows(list, command) {
+            Verdict::allow()
+        } else {
+            Verdict::deny(format!(
+                "control command '/{}' not allowed in {:?} context",
+                command, context
+            ))
+        }
+    }
+
+    /// Wall-clock schedule check.
+    pub fn check_schedule(&self, context: ContextTier) -> Verdict {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        self.check_schedule_at(context, timestamp)
+    }
+
+    /// Deterministic schedule check (useful for tests).
+    pub fn check_schedule_at(&self, context: ContextTier, timestamp: u64) -> Verdict {
+        let window = match context {
+            ContextTier::Public => &self.schedule_public,
+            ContextTier::Family => &self.schedule_family,
+            ContextTier::Private => &self.schedule_private,
+        };
+
+        let Some(window) = window else {
+            return Verdict::allow();
+        };
+
+        let local_secs = (timestamp as i64) + (self.utc_offset as i64 * 3600);
+        let hour = ((local_secs % 86400 + 86400) % 86400 / 3600) as u8;
+
+        let in_window = if window.allowed_start_hour <= window.allowed_end_hour {
+            hour >= window.allowed_start_hour && hour < window.allowed_end_hour
+        } else {
+            hour >= window.allowed_start_hour || hour < window.allowed_end_hour
+        };
+
+        if in_window {
+            Verdict::allow()
+        } else {
+            Verdict::deny(format!(
+                "outside allowed hours ({:02}:00-{:02}:00) for {:?} context (current hour: {:02})",
+                window.allowed_start_hour, window.allowed_end_hour, context, hour
+            ))
+        }
+    }
+
+    pub fn check_action(&self, context: ContextTier, action: &Action) -> Verdict {
+        let primitive = action.executable_action();
+
+        match primitive {
+            Action::NoOp { .. } => Verdict::allow(),
+            Action::Exec { .. } => {
+                let allowed = match context {
+                    ContextTier::Private => self.allow_exec_in_private,
+                    ContextTier::Family => self.allow_exec_in_family,
+                    ContextTier::Public => self.allow_exec_in_public,
+                };
+                if allowed {
+                    Verdict::allow()
+                } else {
+                    Verdict::deny(format!("exec denied in {:?} context", context))
+                }
+            }
+            Action::WebFetch { host, .. } => {
+                if self.host_allowed(host) {
+                    Verdict::allow()
+                } else {
+                    Verdict::deny(format!("host not allowlisted: {host}"))
+                }
+            }
+            Action::Respond { channel, .. } => {
+                let target = self.context_for_channel(*channel);
+                if context.can_flow_to(target) {
+                    Verdict::allow()
+                } else {
+                    Verdict::deny(format!(
+                        "information flow denied: {:?} -> {:?}",
+                        context, target
+                    ))
+                }
+            }
+            Action::ReadFile { path } => {
+                let canonical = match canonicalize_existing_file(path) {
+                    Ok(p) => p,
+                    Err(err) => return Verdict::deny(err),
+                };
+                let Some(target_tier) = self.roots.tier_for_path(&canonical) else {
+                    return Verdict::deny(format!("path outside home: {}", canonical.display()));
+                };
+                if context.can_read(target_tier) {
+                    Verdict::allow()
+                } else {
+                    Verdict::deny(format!(
+                        "read denied for {:?} on {:?} file: {}",
+                        context,
+                        target_tier,
+                        canonical.display()
+                    ))
+                }
+            }
+            Action::ListDir { path } => {
+                let canonical = match canonicalize_existing_dir(path) {
+                    Ok(p) => p,
+                    Err(err) => return Verdict::deny(err),
+                };
+                let Some(target_tier) = self.roots.tier_for_path(&canonical) else {
+                    return Verdict::deny(format!("path outside home: {}", canonical.display()));
+                };
+                if context.can_read(target_tier) {
+                    Verdict::allow()
+                } else {
+                    Verdict::deny(format!(
+                        "list_dir denied for {:?} on {:?} dir: {}",
+                        context,
+                        target_tier,
+                        canonical.display()
+                    ))
+                }
+            }
+            Action::WriteFile { path, .. } => {
+                let canonical = match canonicalize_write_target(path) {
+                    Ok(p) => p,
+                    Err(err) => return Verdict::deny(err),
+                };
+                let Some(target_tier) = self.roots.tier_for_path(&canonical) else {
+                    return Verdict::deny(format!("path outside home: {}", canonical.display()));
+                };
+                if context.can_write(target_tier) {
+                    Verdict::allow()
+                } else {
+                    Verdict::deny(format!(
+                        "write denied for {:?} to {:?} file: {}",
+                        context,
+                        target_tier,
+                        canonical.display()
+                    ))
+                }
+            }
+            Action::ToolAction { .. } => {
+                Verdict::deny("internal error: unflattened ToolAction reached primitive gate")
+            }
+        }
+    }
+
+    /// Best-effort data label produced by an executed action in the current turn.
+    ///
+    /// Minimal Option A policy:
+    /// - file and directory reads inherit path tier
+    /// - exec inherits caller context (conservative)
+    /// - web fetch is treated as public
+    /// - writes inherit target path tier
+    pub fn output_label_for_action(&self, context: ContextTier, action: &Action) -> ContextTier {
+        let primitive = action.executable_action();
+        match primitive {
+            Action::ReadFile { path } => canonicalize_existing_file(path)
+                .ok()
+                .and_then(|p| self.roots.tier_for_path(&p))
+                .unwrap_or(context),
+            Action::ListDir { path } => canonicalize_existing_dir(path)
+                .ok()
+                .and_then(|p| self.roots.tier_for_path(&p))
+                .unwrap_or(context),
+            Action::WriteFile { path, .. } => canonicalize_write_target(path)
+                .ok()
+                .and_then(|p| self.roots.tier_for_path(&p))
+                .unwrap_or(context),
+            Action::Exec { .. } => context,
+            Action::WebFetch { .. } => ContextTier::Public,
+            Action::Respond { .. } | Action::NoOp { .. } | Action::ToolAction { .. } => {
+                ContextTier::Public
+            }
+        }
+    }
+
+    fn host_allowed(&self, host: &str) -> bool {
+        let host = normalize_host(host);
+        self.network_allowlist.iter().any(|allowed| {
+            let allowed = normalize_host(allowed);
+            host == allowed || host.ends_with(&format!(".{allowed}"))
+        })
+    }
+}
+
+fn parse_channel(raw: &str) -> Option<Channel> {
+    let key = raw.trim().to_ascii_lowercase().replace('-', "_");
+    match key.as_str() {
+        "telegram_public" => Some(Channel::TelegramPublic),
+        "telegram_family" => Some(Channel::TelegramFamily),
+        "telegram_dm" => Some(Channel::TelegramDm),
+        "terminal" => Some(Channel::Terminal),
+        "internal" => Some(Channel::Internal),
+        "api" | "web" => Some(Channel::Api),
+        "moltbook" => Some(Channel::Moltbook),
+        _ => None,
+    }
+}
+
+fn parse_tier(raw: &str) -> Option<ContextTier> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "public" => Some(ContextTier::Public),
+        "family" => Some(ContextTier::Family),
+        "private" => Some(ContextTier::Private),
+        _ => None,
+    }
+}
+
+fn list_only(list: &Option<StringList>) -> Vec<String> {
+    list.as_ref().map(|l| l.allow.clone()).unwrap_or_default()
+}
+
+fn list_with_fallback(primary: &Option<StringList>, fallback: &Option<StringList>) -> Vec<String> {
+    if let Some(primary) = primary {
+        return primary.allow.clone();
+    }
+    if let Some(fallback) = fallback {
+        return fallback.allow.clone();
+    }
+    Vec::new()
+}
+
+fn list_allows(list: &[String], value: &str) -> bool {
+    list.iter()
+        .any(|entry| entry == "*" || entry.eq_ignore_ascii_case(value))
+}
+
+fn canonicalize_dir(path: &Path) -> Result<PathBuf, String> {
+    let canonical = fs::canonicalize(path)
+        .map_err(|err| format!("failed to canonicalize '{}': {err}", path.display()))?;
+    if !canonical.is_dir() {
+        return Err(format!("expected directory: {}", canonical.display()));
+    }
+    Ok(canonical)
+}
+
+fn canonicalize_existing_file(path: &Path) -> Result<PathBuf, String> {
+    if !path.is_absolute() {
+        return Err(format!("path must be absolute: {}", path.display()));
+    }
+    let canonical = fs::canonicalize(path)
+        .map_err(|err| format!("failed to canonicalize '{}': {err}", path.display()))?;
+    if !canonical.is_file() {
+        return Err(format!("expected file: {}", canonical.display()));
+    }
+    Ok(canonical)
+}
+
+fn canonicalize_existing_dir(path: &Path) -> Result<PathBuf, String> {
+    if !path.is_absolute() {
+        return Err(format!("path must be absolute: {}", path.display()));
+    }
+    let canonical = fs::canonicalize(path)
+        .map_err(|err| format!("failed to canonicalize '{}': {err}", path.display()))?;
+    if !canonical.is_dir() {
+        return Err(format!("expected directory: {}", canonical.display()));
+    }
+    Ok(canonical)
+}
+
+fn canonicalize_write_target(path: &Path) -> Result<PathBuf, String> {
+    if !path.is_absolute() {
+        return Err(format!("path must be absolute: {}", path.display()));
+    }
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| format!("write target must include file name: {}", path.display()))?;
+    let parent = path.parent().ok_or_else(|| {
+        format!(
+            "write target must have parent directory: {}",
+            path.display()
+        )
+    })?;
+    let canonical_parent = fs::canonicalize(parent).map_err(|err| {
+        format!(
+            "failed to canonicalize parent '{}': {err}",
+            parent.display()
+        )
+    })?;
+    Ok(canonical_parent.join(file_name))
+}
+
+fn has_dot_component_within_home(path: &Path, home_root: &Path) -> bool {
+    let Ok(rel) = path.strip_prefix(home_root) else {
+        return false;
+    };
+    rel.components().any(|c| match c {
+        Component::Normal(name) => name.to_string_lossy().starts_with('.'),
+        _ => false,
+    })
+}
+
+fn normalize_host(host: &str) -> String {
+    host.trim().trim_end_matches('.').to_ascii_lowercase()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use crate::config::Config;
+    use crate::types::{Channel, ContextTier};
+
+    use super::GatePolicy;
+
+    fn make_test_dirs() -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
+        let id = format!(
+            "vericore-policy-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        );
+        let base = std::env::temp_dir().join(id);
+        let private = base.join("private");
+        let family = base.join("family");
+        fs::create_dir_all(&private).expect("private dir");
+        fs::create_dir_all(&family).expect("family dir");
+        (base, private, family)
+    }
+
+    #[test]
+    fn channel_map_from_config_overrides_default() {
+        let (base, private, family) = make_test_dirs();
+        let cfg = format!(
+            r#"
+[paths]
+home_root = "{}"
+private = "{}"
+family = "{}"
+
+[network]
+allowlist = []
+
+[exec]
+allow_in_private = true
+allow_in_family = false
+allow_in_public = false
+
+[channels.map]
+telegram_public = "family"
+
+[gate]
+gate_action_kinds = false
+gate_tool_identity = false
+gate_skill_identity = false
+
+[schedule]
+utc_offset = 0
+"#,
+            base.display(),
+            private.display(),
+            family.display(),
+        );
+
+        let config: Config = toml::from_str(&cfg).expect("parse config");
+        let policy = GatePolicy::from_config(&config).expect("build policy");
+        assert_eq!(
+            policy.context_for_channel(Channel::TelegramPublic),
+            ContextTier::Family
+        );
+    }
+
+    #[test]
+    fn unknown_channel_in_config_is_rejected() {
+        let (base, private, family) = make_test_dirs();
+        let cfg = format!(
+            r#"
+[paths]
+home_root = "{}"
+private = "{}"
+family = "{}"
+
+[network]
+allowlist = []
+
+[exec]
+allow_in_private = true
+allow_in_family = false
+allow_in_public = false
+
+[channels.map]
+unknown_channel = "public"
+
+[gate]
+gate_action_kinds = false
+gate_tool_identity = false
+gate_skill_identity = false
+
+[schedule]
+utc_offset = 0
+"#,
+            base.display(),
+            private.display(),
+            family.display(),
+        );
+
+        let config: Config = toml::from_str(&cfg).expect("parse config");
+        let err = GatePolicy::from_config(&config).expect_err("must reject unknown channel");
+        assert!(err.contains("unknown channel"));
+    }
+
+    #[test]
+    fn control_command_defaults_allow_all() {
+        let (base, private, family) = make_test_dirs();
+        let roots = super::ContextRoots::new(&base, &private, &family).expect("roots");
+        let policy = GatePolicy::new(roots, vec![]);
+
+        assert!(
+            policy
+                .check_control_command(ContextTier::Public, Some("model"))
+                .is_allowed()
+        );
+        assert!(
+            policy
+                .check_control_command(ContextTier::Family, Some("restart"))
+                .is_allowed()
+        );
+        assert!(
+            policy
+                .check_control_command(ContextTier::Private, Some("credits"))
+                .is_allowed()
+        );
+    }
+
+    #[test]
+    fn control_command_config_applies_per_context() {
+        let (base, private, family) = make_test_dirs();
+        let cfg = format!(
+            r#"
+[paths]
+home_root = "{}"
+private = "{}"
+family = "{}"
+
+[network]
+allowlist = []
+
+[exec]
+allow_in_private = true
+allow_in_family = false
+allow_in_public = false
+
+[channels.map]
+telegram_public = "public"
+
+[gate]
+gate_action_kinds = false
+gate_tool_identity = false
+gate_skill_identity = false
+
+[control]
+enforce = true
+public = ["help", "model"]
+family = ["help", "model", "status"]
+private = ["*"]
+
+[schedule]
+utc_offset = 0
+"#,
+            base.display(),
+            private.display(),
+            family.display(),
+        );
+
+        let config: Config = toml::from_str(&cfg).expect("parse config");
+        let policy = GatePolicy::from_config(&config).expect("build policy");
+
+        assert!(
+            policy
+                .check_control_command(ContextTier::Public, Some("help"))
+                .is_allowed()
+        );
+        assert!(
+            policy
+                .check_control_command(ContextTier::Family, Some("status"))
+                .is_allowed()
+        );
+        assert!(
+            policy
+                .check_control_command(ContextTier::Private, Some("restart"))
+                .is_allowed()
+        );
+
+        assert!(
+            !policy
+                .check_control_command(ContextTier::Public, Some("restart"))
+                .is_allowed()
+        );
+        assert!(
+            !policy
+                .check_control_command(ContextTier::Family, Some("restart"))
+                .is_allowed()
+        );
+    }
+}

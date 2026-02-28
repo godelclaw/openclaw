@@ -1,0 +1,507 @@
+import { spawn } from "node:child_process";
+import { createConnection } from "node:net";
+
+import type { FinalizedMsgContext } from "../auto-reply/templating.js";
+
+const DEFAULT_DECIDE_TIMEOUT_MS = 3000;
+const DEFAULT_RUN_TIMEOUT_MS = 120000;
+
+export type VeriCoreRoutePreference = "off" | "gate" | "driver" | "fallback";
+
+export type VeriCoreStimulusInput = {
+  channel: string;
+  actor: string;
+  content: string;
+  timestamp: number;
+  session_key?: string;
+  route_preference?: VeriCoreRoutePreference;
+};
+
+export type VeriCoreStimulusDecision = {
+  allow: boolean;
+  context: string;
+  channel: string;
+  reason?: string | null;
+};
+
+export type VeriCoreRouteTarget = "control" | "driver" | "fallback";
+
+export type VeriCoreStimulusRouteDecision = {
+  allow: boolean;
+  context: string;
+  channel: string;
+  route: VeriCoreRouteTarget;
+  reason?: string | null;
+  is_control: boolean;
+  command?: string | null;
+  session_key: string;
+};
+
+export type VeriCoreTurnOutcome = {
+  response: string;
+  tools_used: string[];
+  prompt_tokens: number;
+  completion_tokens: number;
+};
+
+export type VeriCoreRunResult = {
+  decision: VeriCoreStimulusDecision;
+  route?: VeriCoreStimulusRouteDecision;
+  outcome?: VeriCoreTurnOutcome;
+};
+
+type VeriCoreSocketResponse<T> = {
+  ok: boolean;
+  id?: string;
+  result?: T;
+  error?: string;
+};
+
+export type VeriCoreBridgeOptions = {
+  binPath?: string;
+  configPath?: string;
+  socketPath?: string;
+  timeoutMs?: number;
+  disableSocket?: boolean;
+  disableSpawnFallback?: boolean;
+};
+
+export function resolveVeriCoreBinaryPath(): string {
+  const fromEnv = process.env.VERICORE_CORE_BIN?.trim();
+  if (fromEnv) {
+    return fromEnv;
+  }
+  return "/home/zarclaw/repos/godelclaw/vericore-core/target/release/vericore-core";
+}
+
+export function resolveVeriCoreConfigPath(): string {
+  const fromEnv = process.env.VERICORE_CORE_CONFIG?.trim();
+  if (fromEnv) {
+    return fromEnv;
+  }
+  return "/home/zarclaw/repos/godelclaw/vericore-core/vericore.toml";
+}
+
+export function resolveVeriCoreSocketPath(): string {
+  const fromEnv = process.env.VERICORE_CORE_SOCKET?.trim();
+  if (fromEnv) {
+    return fromEnv;
+  }
+
+  try {
+    const uid = typeof process.getuid === "function" ? process.getuid() : 1001;
+    return `/run/user/${uid}/vericore-core.sock`;
+  } catch {
+    return "/tmp/vericore-core.sock";
+  }
+}
+
+function resolveVeriCoreRunTimeoutMs(): number {
+  const raw = process.env.VERICORE_RUN_TIMEOUT_MS?.trim();
+  if (raw) {
+    const parsed = Number(raw);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return Math.floor(parsed);
+    }
+  }
+  return DEFAULT_RUN_TIMEOUT_MS;
+}
+
+export function deriveVeriCoreChannel(ctx: FinalizedMsgContext): string {
+  const source = String(ctx.OriginatingChannel ?? ctx.Surface ?? ctx.Provider ?? "").toLowerCase();
+  const chatType = String(ctx.ChatType ?? "").toLowerCase();
+  const sessionKey = String(ctx.SessionKey ?? "").toLowerCase();
+
+  if (
+    source === "internal" ||
+    source === "heartbeat" ||
+    source === "exec-event" ||
+    source === "cron-event" ||
+    source === "cron"
+  ) {
+    return "internal";
+  }
+
+  if (source === "terminal") {
+    return "terminal";
+  }
+
+  if (source === "moltbook") {
+    return "moltbook";
+  }
+
+  if (source === "telegram") {
+    if (sessionKey.includes("agent:family") || sessionKey.includes(":family:")) {
+      return "telegram_family";
+    }
+    if (chatType === "group" || chatType === "supergroup" || chatType === "channel") {
+      return "telegram_public";
+    }
+    return "telegram_dm";
+  }
+
+  if (
+    source === "api" ||
+    source === "web" ||
+    source === "webchat" ||
+    source === "discord" ||
+    source === "slack" ||
+    source === "signal" ||
+    source === "whatsapp" ||
+    source === "matrix"
+  ) {
+    return "api";
+  }
+
+  return "api";
+}
+
+export function buildVeriCoreStimulusInput(ctx: FinalizedMsgContext): VeriCoreStimulusInput {
+  const channel = deriveVeriCoreChannel(ctx);
+  const actor =
+    ctx.SenderId ??
+    ctx.SenderUsername ??
+    ctx.SenderName ??
+    ctx.From ??
+    ctx.SessionKey ??
+    "unknown";
+  const content =
+    ctx.BodyForCommands ??
+    ctx.CommandBody ??
+    ctx.RawBody ??
+    ctx.BodyForAgent ??
+    ctx.Body ??
+    "";
+  const timestamp =
+    typeof ctx.Timestamp === "number" && Number.isFinite(ctx.Timestamp)
+      ? Math.floor(ctx.Timestamp)
+      : Math.floor(Date.now() / 1000);
+
+  return {
+    channel,
+    actor,
+    content,
+    timestamp,
+    session_key: ctx.SessionKey,
+  };
+}
+
+async function runVeriCoreSocketMethod<T>(
+  method: "health" | "decide" | "route" | "run",
+  stimulus: VeriCoreStimulusInput | undefined,
+  options: VeriCoreBridgeOptions,
+): Promise<T> {
+  const socketPath = options.socketPath ?? resolveVeriCoreSocketPath();
+  const timeoutMs = options.timeoutMs ?? DEFAULT_DECIDE_TIMEOUT_MS;
+  const requestPayload = JSON.stringify({ method, stimulus });
+
+  return await new Promise<T>((resolve, reject) => {
+    const socket = createConnection({ path: socketPath });
+    let response = "";
+    let settled = false;
+
+    const finishError = (error: Error): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timeoutHandle);
+      reject(error);
+    };
+
+    const finishSuccess = (): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timeoutHandle);
+
+      try {
+        const parsed = JSON.parse(response) as VeriCoreSocketResponse<T>;
+        if (!parsed.ok) {
+          reject(
+            new Error(`vericore socket ${method} failed: ${parsed.error ?? "unknown daemon error"}`),
+          );
+          return;
+        }
+        if (typeof parsed.result === "undefined") {
+          reject(new Error(`vericore socket ${method} missing 'result' payload`));
+          return;
+        }
+        resolve(parsed.result);
+      } catch (error) {
+        reject(
+          new Error(
+            `vericore socket ${method} returned invalid JSON: ${(error as Error).message}; response='${response.trim()}'`,
+          ),
+        );
+      }
+    };
+
+    const timeoutHandle = setTimeout(() => {
+      socket.destroy();
+      finishError(new Error(`vericore socket ${method} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+
+    socket.on("connect", () => {
+      socket.end(requestPayload);
+    });
+
+    socket.on("data", (chunk: Buffer | string) => {
+      response += chunk.toString();
+    });
+
+    socket.on("end", () => {
+      finishSuccess();
+    });
+
+    socket.on("close", (hadError) => {
+      if (!hadError && !settled) {
+        finishSuccess();
+      }
+    });
+
+    socket.on("error", (error) => {
+      finishError(error);
+    });
+  });
+}
+
+function isRecoverableSocketError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  return (
+    code === "ENOENT" ||
+    code === "ECONNREFUSED" ||
+    code === "ENOTSOCK" ||
+    code === "ECONNRESET" ||
+    code === "EPIPE" ||
+    code === "ETIMEDOUT"
+  );
+}
+
+async function runVeriCoreCommandViaProcess(
+  command: "decide" | "route" | "run",
+  stimulus: VeriCoreStimulusInput,
+  options: VeriCoreBridgeOptions,
+): Promise<string> {
+  const binPath = options.binPath ?? resolveVeriCoreBinaryPath();
+  const configPath = options.configPath ?? resolveVeriCoreConfigPath();
+  const timeoutMs = options.timeoutMs ?? DEFAULT_DECIDE_TIMEOUT_MS;
+
+  return await new Promise<string>((resolve, reject) => {
+    const child = spawn(binPath, [command, "--config", configPath], {
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+
+    const timeoutHandle = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGKILL");
+    }, timeoutMs);
+
+    child.stdout.on("data", (chunk: Buffer | string) => {
+      stdout += chunk.toString();
+    });
+
+    child.stderr.on("data", (chunk: Buffer | string) => {
+      stderr += chunk.toString();
+    });
+
+    child.on("error", (error) => {
+      clearTimeout(timeoutHandle);
+      reject(error);
+    });
+
+    child.on("close", (code) => {
+      clearTimeout(timeoutHandle);
+      if (timedOut) {
+        reject(new Error(`vericore ${command} timed out after ${timeoutMs}ms`));
+        return;
+      }
+      if (code !== 0) {
+        reject(
+          new Error(
+            `vericore ${command} failed (code=${code}): ${stderr.trim() || "no stderr output"}`,
+          ),
+        );
+        return;
+      }
+      resolve(stdout);
+    });
+
+    child.stdin.end(JSON.stringify(stimulus));
+  });
+}
+
+function parseJsonOutput<T>(stdout: string, method: string): T {
+  try {
+    return JSON.parse(stdout) as T;
+  } catch (error) {
+    throw new Error(
+      `vericore ${method} returned invalid JSON: ${(error as Error).message}; stdout='${stdout.trim()}'`,
+      { cause: error },
+    );
+  }
+}
+
+async function runVeriCoreStimulusDecisionViaSocket(
+  stimulus: VeriCoreStimulusInput,
+  options: VeriCoreBridgeOptions,
+): Promise<VeriCoreStimulusDecision> {
+  return await runVeriCoreSocketMethod<VeriCoreStimulusDecision>("decide", stimulus, options);
+}
+
+async function runVeriCoreStimulusDecisionViaProcess(
+  stimulus: VeriCoreStimulusInput,
+  options: VeriCoreBridgeOptions = {},
+): Promise<VeriCoreStimulusDecision> {
+  const stdout = await runVeriCoreCommandViaProcess("decide", stimulus, {
+    ...options,
+    timeoutMs: options.timeoutMs ?? DEFAULT_DECIDE_TIMEOUT_MS,
+  });
+  return parseJsonOutput<VeriCoreStimulusDecision>(stdout, "decide");
+}
+
+async function runVeriCoreStimulusRouteViaSocket(
+  stimulus: VeriCoreStimulusInput,
+  options: VeriCoreBridgeOptions,
+): Promise<VeriCoreStimulusRouteDecision> {
+  return await runVeriCoreSocketMethod<VeriCoreStimulusRouteDecision>("route", stimulus, options);
+}
+
+async function runVeriCoreStimulusRouteViaProcess(
+  stimulus: VeriCoreStimulusInput,
+  options: VeriCoreBridgeOptions = {},
+): Promise<VeriCoreStimulusRouteDecision> {
+  const stdout = await runVeriCoreCommandViaProcess("route", stimulus, {
+    ...options,
+    timeoutMs: options.timeoutMs ?? DEFAULT_DECIDE_TIMEOUT_MS,
+  });
+  return parseJsonOutput<VeriCoreStimulusRouteDecision>(stdout, "route");
+}
+
+async function runVeriCoreStimulusRunViaSocket(
+  stimulus: VeriCoreStimulusInput,
+  options: VeriCoreBridgeOptions,
+): Promise<VeriCoreRunResult> {
+  const result = await runVeriCoreSocketMethod<VeriCoreRunResult>("run", stimulus, options);
+  if (!result?.decision) {
+    throw new Error("vericore socket run missing 'decision' payload");
+  }
+  return result;
+}
+
+async function runVeriCoreStimulusRunViaProcess(
+  stimulus: VeriCoreStimulusInput,
+  options: VeriCoreBridgeOptions,
+): Promise<VeriCoreRunResult> {
+  const stdout = await runVeriCoreCommandViaProcess("run", stimulus, {
+    ...options,
+    timeoutMs: options.timeoutMs ?? resolveVeriCoreRunTimeoutMs(),
+  });
+
+  // Back-compat: CLI run may emit TurnOutcome only.
+  const parsed = parseJsonOutput<VeriCoreRunResult | VeriCoreTurnOutcome>(stdout, "run");
+  if ((parsed as VeriCoreRunResult).decision) {
+    return parsed as VeriCoreRunResult;
+  }
+
+  const decision = await runVeriCoreStimulusDecisionViaProcess(stimulus, {
+    ...options,
+    timeoutMs: DEFAULT_DECIDE_TIMEOUT_MS,
+  });
+  return {
+    decision,
+    outcome: parsed as VeriCoreTurnOutcome,
+  };
+}
+
+export async function runVeriCoreStimulusDecision(
+  stimulus: VeriCoreStimulusInput,
+  options: VeriCoreBridgeOptions = {},
+): Promise<VeriCoreStimulusDecision> {
+  const decideOptions = {
+    ...options,
+    timeoutMs: options.timeoutMs ?? DEFAULT_DECIDE_TIMEOUT_MS,
+  };
+
+  if (!decideOptions.disableSocket) {
+    try {
+      return await runVeriCoreStimulusDecisionViaSocket(stimulus, decideOptions);
+    } catch (error) {
+      if (decideOptions.disableSpawnFallback || !isRecoverableSocketError(error)) {
+        throw error;
+      }
+    }
+  }
+
+  return await runVeriCoreStimulusDecisionViaProcess(stimulus, decideOptions);
+}
+
+export async function runVeriCoreStimulusRoute(
+  stimulus: VeriCoreStimulusInput,
+  options: VeriCoreBridgeOptions = {},
+): Promise<VeriCoreStimulusRouteDecision> {
+  const routeOptions = {
+    ...options,
+    timeoutMs: options.timeoutMs ?? DEFAULT_DECIDE_TIMEOUT_MS,
+  };
+
+  if (!routeOptions.disableSocket) {
+    try {
+      return await runVeriCoreStimulusRouteViaSocket(stimulus, routeOptions);
+    } catch (error) {
+      if (routeOptions.disableSpawnFallback || !isRecoverableSocketError(error)) {
+        throw error;
+      }
+    }
+  }
+
+  return await runVeriCoreStimulusRouteViaProcess(stimulus, routeOptions);
+}
+
+export async function runVeriCoreStimulusRun(
+  stimulus: VeriCoreStimulusInput,
+  options: VeriCoreBridgeOptions = {},
+): Promise<VeriCoreRunResult> {
+  const runOptions = {
+    ...options,
+    timeoutMs: options.timeoutMs ?? resolveVeriCoreRunTimeoutMs(),
+  };
+
+  if (!runOptions.disableSocket) {
+    try {
+      return await runVeriCoreStimulusRunViaSocket(stimulus, runOptions);
+    } catch (error) {
+      if (runOptions.disableSpawnFallback || !isRecoverableSocketError(error)) {
+        throw error;
+      }
+    }
+  }
+
+  return await runVeriCoreStimulusRunViaProcess(stimulus, runOptions);
+}
+
+export async function runVeriCoreDecisionForContext(
+  ctx: FinalizedMsgContext,
+  options?: VeriCoreBridgeOptions,
+): Promise<VeriCoreStimulusDecision> {
+  return await runVeriCoreStimulusDecision(buildVeriCoreStimulusInput(ctx), options);
+}
+
+export async function runVeriCoreRouteForContext(
+  ctx: FinalizedMsgContext,
+  options?: VeriCoreBridgeOptions,
+): Promise<VeriCoreStimulusRouteDecision> {
+  return await runVeriCoreStimulusRoute(buildVeriCoreStimulusInput(ctx), options);
+}
+
+export async function runVeriCoreRunForContext(
+  ctx: FinalizedMsgContext,
+  options?: VeriCoreBridgeOptions,
+): Promise<VeriCoreRunResult> {
+  return await runVeriCoreStimulusRun(buildVeriCoreStimulusInput(ctx), options);
+}

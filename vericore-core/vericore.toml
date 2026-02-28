@@ -1,0 +1,107 @@
+#[VeriCore Gate Configuration remains unchanged except LLM model]
+# Default posture: anything under home_root is Public unless marked Family/Private.
+
+[paths]
+home_root = "/home/zarclaw"
+private = "/home/zarclaw/private"
+family = "/home/zarclaw/family"
+private_prefixes = []
+family_prefixes = []
+dot_paths_private = true
+
+[network]
+allowlist = [
+  "openrouter.ai",
+  "api.anthropic.com",
+  "mcp.tavily.com",
+  "www.moltbook.com",
+]
+
+[exec]
+allow_in_private = true
+allow_in_family = false
+allow_in_public = false
+
+[channels]
+# Unmapped channels use built-in defaults in policy.rs.
+[channels.map]
+telegram_dm = "private"
+terminal = "private"
+internal = "private"
+telegram_family = "family"
+telegram_public = "public"
+api = "public"
+moltbook = "public"
+
+[gate]
+# Primitive action-kind gating (read_file/write_file/exec/...)
+gate_action_kinds = false
+# Back-compat alias still supported: gate_tools = false
+
+# Optional tool identity gating (tool_name inside ToolAction)
+gate_tool_identity = false
+
+# Optional skill identity gating (skill_name inside ToolAction)
+# WARNING: Phase 1 does not wire skill_name (always None). Do not enable until skills are implemented.
+gate_skill_identity = false
+
+[gate.action_kinds_public]
+allow = ["read_file", "respond", "web_fetch"]
+
+[gate.action_kinds_family]
+allow = ["read_file", "write_file", "respond", "web_fetch"]
+
+[gate.action_kinds_private]
+allow = ["*"]
+
+[gate.tool_ids_public]
+allow = ["web_search", "read_file", "list_dir"]
+
+[gate.tool_ids_family]
+allow = ["web_search", "read_file", "list_dir", "write_file"]
+
+[gate.tool_ids_private]
+allow = ["*"]
+
+[gate.skill_ids_public]
+allow = ["*"]
+
+[gate.skill_ids_family]
+allow = ["*"]
+
+[gate.skill_ids_private]
+allow = ["*"]
+
+[control]
+# Control-command verifier. Keep permissive first; tighten per context as needed.
+enforce = true
+public = ["*"]
+family = ["*"]
+private = ["*"]
+
+[schedule]
+# Trusted wall-clock schedule: uses system time + utc_offset.
+utc_offset = 1
+
+[schedule.public]
+allowed_start_hour = 7
+allowed_end_hour = 23
+
+[llm]
+model = "anthropic/claude-sonnet-4.6"
+api_base = "https://openrouter.ai/api/v1"
+api_key_env = "OPENROUTER_API_KEY"
+max_tokens = 4096
+temperature = 0.7
+timeout_secs = 120
+
+[turn]
+max_iterations = 20
+gas_budget = 200
+exec_timeout_secs = 60
+max_tool_calls = 64
+finalize_without_tools_on_limit = true
+history_messages_max = 40
+
+[system_prompt]
+file = "/home/zarclaw/repos/godelclaw/.BGIseed-state/workspace/SOUL.md"
