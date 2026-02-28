@@ -173,6 +173,30 @@ function buildChatCommands(): ChatCommandDefinition[] {
       category: "status",
     }),
     defineChatCommand({
+      key: "memory-status",
+      nativeName: "memory_status",
+      description: "Show VeriCore memory and history counters.",
+      textAliases: ["/memory-status", "/memory_status"],
+      category: "status",
+    }),
+    defineChatCommand({
+      key: "memory-query",
+      nativeName: "memory_query",
+      description: "Query VeriCore memory (semantic + keyword).",
+      textAliases: ["/memory-query", "/memory_query"],
+      acceptsArgs: true,
+      args: [
+        {
+          name: "query",
+          description: "Search text",
+          type: "string",
+          required: true,
+          captureRemaining: true,
+        },
+      ],
+      category: "status",
+    }),
+    defineChatCommand({
       key: "allowlist",
       description: "List/add/remove allowlist entries.",
       textAlias: "/allowlist",

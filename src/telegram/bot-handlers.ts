@@ -26,9 +26,11 @@ import { readChannelAllowFromStore } from "../pairing/pairing-store.js";
 import { resolveAgentRoute } from "../routing/resolve-route.js";
 import { resolveThreadSessionKeys } from "../routing/session-key.js";
 import {
+  runVeriCoreMemoryQuery,
   runVeriCoreMemoryStatus,
   runVeriCoreStimulusRoute,
   runVeriCoreStimulusRun,
+  type VeriCoreMemoryQueryResult,
   type VeriCoreMemoryStatus,
   type VeriCoreRoutePreference,
 } from "../vericore/impetus.js";
@@ -92,6 +94,30 @@ function isMemoryStatusCommand(command?: string | null): boolean {
   );
 }
 
+function isMemoryQueryCommand(command?: string | null): boolean {
+  if (!command) {
+    return false;
+  }
+  const normalized = command.trim().toLowerCase();
+  return (
+    normalized === "memory-query" ||
+    normalized === "memory_query" ||
+    normalized === "memoryquery"
+  );
+}
+
+function parseMemoryQueryText(text?: string): string {
+  const body = (text ?? "").trim();
+  if (!body.startsWith("/")) {
+    return body;
+  }
+  const firstSpace = body.search(/\s/);
+  if (firstSpace < 0) {
+    return "";
+  }
+  return body.slice(firstSpace + 1).trim();
+}
+
 function formatMemoryStatusMessage(status: VeriCoreMemoryStatus): string {
   const byTier = Object.entries(status.memory.by_tier)
     .map(([tier, count]) => `${tier}: ${count}`)
@@ -108,6 +134,25 @@ function formatMemoryStatusMessage(status: VeriCoreMemoryStatus): string {
     `- memory file: ${status.memory.file}`,
     `- history root: ${status.history.root}`,
     `- history daily/week/merged: ${status.history.daily_files}/${status.history.weekly_files}/${status.history.daily_merged_files}`,
+  ].join("\n");
+}
+
+function formatMemoryQueryMessage(result: VeriCoreMemoryQueryResult): string {
+  if (!result.hits.length) {
+    return `No memory hits for: "${result.query}"`;
+  }
+
+  const lines = result.hits.slice(0, 8).map((hit, index) => {
+    const datePart = hit.source_date ? ` | ${hit.source_date}` : "";
+    const categories = hit.categories?.length ? ` [${hit.categories.slice(0, 3).join(", ")}]` : "";
+    return `${index + 1}. (${hit.score.toFixed(2)}) ${hit.summary}${categories} (${hit.type}${datePart})`;
+  });
+
+  return [
+    `Memory query: "${result.query}"`,
+    `- tier: ${result.tier}`,
+    `- hits: ${result.hits.length}`,
+    ...lines,
   ].join("\n");
 }
 
@@ -406,6 +451,27 @@ export const registerTelegramHandlers = ({
     }
 
     if (route.route === "control") {
+      if (isMemoryQueryCommand(route.command)) {
+        try {
+          const query = parseMemoryQueryText(params.msg.text ?? params.msg.caption ?? "");
+          if (!query) {
+            await sendVeriCoreDriverResponse(
+              params.msg,
+              "Usage: /memory-query <your query text>",
+            );
+            return;
+          }
+
+          const result = await runVeriCoreMemoryQuery(query, stimulusInput);
+          await sendVeriCoreDriverResponse(params.msg, formatMemoryQueryMessage(result));
+          return;
+        } catch (err) {
+          runtime.error?.(warn(`vericore memory_query error (falling back): ${String(err)}`));
+          await params.onFallback();
+          return;
+        }
+      }
+
       if (isMemoryStatusCommand(route.command)) {
         try {
           const status = await runVeriCoreMemoryStatus();

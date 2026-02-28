@@ -65,6 +65,23 @@ export type VeriCoreMemoryStatus = {
   };
 };
 
+export type VeriCoreMemoryQueryHit = {
+  id: number;
+  score: number;
+  tier: string;
+  type: string;
+  summary: string;
+  categories: string[];
+  source_date?: string | null;
+  reinforcement_count: number;
+};
+
+export type VeriCoreMemoryQueryResult = {
+  query: string;
+  tier: string;
+  hits: VeriCoreMemoryQueryHit[];
+};
+
 type VeriCoreSocketResponse<T> = {
   ok: boolean;
   id?: string;
@@ -202,13 +219,14 @@ export function buildVeriCoreStimulusInput(ctx: FinalizedMsgContext): VeriCoreSt
 }
 
 async function runVeriCoreSocketMethod<T>(
-  method: "health" | "decide" | "route" | "run" | "memory_status",
+  method: "health" | "decide" | "route" | "run" | "memory_status" | "memory_query",
   stimulus: VeriCoreStimulusInput | undefined,
+  query: string | undefined,
   options: VeriCoreBridgeOptions,
 ): Promise<T> {
   const socketPath = options.socketPath ?? resolveVeriCoreSocketPath();
   const timeoutMs = options.timeoutMs ?? DEFAULT_DECIDE_TIMEOUT_MS;
-  const requestPayload = JSON.stringify({ method, stimulus });
+  const requestPayload = JSON.stringify({ method, stimulus, query });
 
   return await new Promise<T>((resolve, reject) => {
     const socket = createConnection({ path: socketPath });
@@ -366,7 +384,12 @@ async function runVeriCoreStimulusDecisionViaSocket(
   stimulus: VeriCoreStimulusInput,
   options: VeriCoreBridgeOptions,
 ): Promise<VeriCoreStimulusDecision> {
-  return await runVeriCoreSocketMethod<VeriCoreStimulusDecision>("decide", stimulus, options);
+  return await runVeriCoreSocketMethod<VeriCoreStimulusDecision>(
+    "decide",
+    stimulus,
+    undefined,
+    options,
+  );
 }
 
 async function runVeriCoreStimulusDecisionViaProcess(
@@ -384,7 +407,12 @@ async function runVeriCoreStimulusRouteViaSocket(
   stimulus: VeriCoreStimulusInput,
   options: VeriCoreBridgeOptions,
 ): Promise<VeriCoreStimulusRouteDecision> {
-  return await runVeriCoreSocketMethod<VeriCoreStimulusRouteDecision>("route", stimulus, options);
+  return await runVeriCoreSocketMethod<VeriCoreStimulusRouteDecision>(
+    "route",
+    stimulus,
+    undefined,
+    options,
+  );
 }
 
 async function runVeriCoreStimulusRouteViaProcess(
@@ -402,7 +430,12 @@ async function runVeriCoreStimulusRunViaSocket(
   stimulus: VeriCoreStimulusInput,
   options: VeriCoreBridgeOptions,
 ): Promise<VeriCoreRunResult> {
-  const result = await runVeriCoreSocketMethod<VeriCoreRunResult>("run", stimulus, options);
+  const result = await runVeriCoreSocketMethod<VeriCoreRunResult>(
+    "run",
+    stimulus,
+    undefined,
+    options,
+  );
   if (!result?.decision) {
     throw new Error("vericore socket run missing 'decision' payload");
   }
@@ -511,7 +544,26 @@ export async function runVeriCoreMemoryStatus(
   return await runVeriCoreSocketMethod<VeriCoreMemoryStatus>(
     "memory_status",
     undefined,
+    undefined,
     statusOptions,
+  );
+}
+
+export async function runVeriCoreMemoryQuery(
+  query: string,
+  stimulus?: VeriCoreStimulusInput,
+  options: VeriCoreBridgeOptions = {},
+): Promise<VeriCoreMemoryQueryResult> {
+  const queryOptions = {
+    ...options,
+    timeoutMs: options.timeoutMs ?? DEFAULT_DECIDE_TIMEOUT_MS,
+  };
+
+  return await runVeriCoreSocketMethod<VeriCoreMemoryQueryResult>(
+    "memory_query",
+    stimulus,
+    query,
+    queryOptions,
   );
 }
 
