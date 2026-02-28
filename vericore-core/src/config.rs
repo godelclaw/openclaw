@@ -30,8 +30,12 @@ pub struct PathsConfig {
     pub private_prefixes: Vec<PathBuf>,
     #[serde(default)]
     pub family_prefixes: Vec<PathBuf>,
+    #[serde(default)]
+    pub public_prefixes: Vec<PathBuf>,
     #[serde(default = "default_true")]
     pub dot_paths_private: bool,
+    #[serde(default)]
+    pub default_private: bool,
 }
 
 #[derive(Debug, Deserialize)]

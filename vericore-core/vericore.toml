@@ -1,13 +1,15 @@
 #[VeriCore Gate Configuration remains unchanged except LLM model]
-# Default posture: anything under home_root is Public unless marked Family/Private.
+# Default posture (current): default_private=true, only configured public_prefixes are Public.
 
 [paths]
 home_root = "/home/zarclaw"
 private = "/home/zarclaw/private"
 family = "/home/zarclaw/family"
-private_prefixes = []
+private_prefixes = ["/home/zarclaw/shared"]
 family_prefixes = []
+public_prefixes = ["/home/zarclaw/public"]
 dot_paths_private = true
+default_private = true
 
 [network]
 allowlist = [

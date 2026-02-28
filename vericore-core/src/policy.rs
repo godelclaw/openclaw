@@ -8,7 +8,7 @@ use crate::types::{Action, Channel, ContextTier, IntegrityTier, Verdict};
 
 /// Filesystem layout:
 ///
-///   /home/zarclaw/              <- home_root (Public by default)
+///   /home/zarclaw/              <- home_root (default classification root)
 ///   /home/zarclaw/private/      <- explicit Private carveout
 ///   /home/zarclaw/family/       <- explicit Family carveout
 ///
@@ -16,6 +16,7 @@ use crate::types::{Action, Channel, ContextTier, IntegrityTier, Verdict};
 /// - dot-prefixed paths are private by default (configurable)
 /// - additive private prefixes can be explicitly listed
 /// - additive family prefixes can be explicitly listed
+/// - optional public carveouts can be explicitly listed when default_private is enabled
 ///
 /// Tier resolution order:
 ///   1) outside home_root => denied
@@ -24,7 +25,8 @@ use crate::types::{Action, Channel, ContextTier, IntegrityTier, Verdict};
 ///   4) dot paths (if enabled) => Private
 ///   5) explicit family carveout => Family
 ///   6) additive family prefixes => Family
-///   7) everything else under home_root => Public
+///   7) if default_private: public prefixes => Public, otherwise Private
+///   8) everything else under home_root => Public
 #[derive(Debug, Clone)]
 pub struct ContextRoots {
     pub home_root: PathBuf,
@@ -32,7 +34,9 @@ pub struct ContextRoots {
     pub family: PathBuf,
     private_prefixes: Vec<PathBuf>,
     family_prefixes: Vec<PathBuf>,
+    public_prefixes: Vec<PathBuf>,
     dot_paths_private: bool,
+    default_private: bool,
 }
 
 impl ContextRoots {
@@ -73,7 +77,9 @@ impl ContextRoots {
             family,
             private_prefixes: Vec::new(),
             family_prefixes: Vec::new(),
+            public_prefixes: Vec::new(),
             dot_paths_private: true,
+            default_private: false,
         })
     }
 
@@ -141,6 +147,65 @@ impl ContextRoots {
         Ok(self)
     }
 
+    pub fn with_public_prefixes(mut self, prefixes: Vec<PathBuf>) -> Result<Self, String> {
+        let mut canonical = Vec::new();
+        for prefix in prefixes {
+            let c = canonicalize_dir(&prefix)?;
+            if !c.starts_with(&self.home_root) {
+                return Err(format!(
+                    "public prefix '{}' must be under home '{}'",
+                    c.display(),
+                    self.home_root.display()
+                ));
+            }
+            if c == self.home_root {
+                return Err("home root cannot be marked as public prefix".into());
+            }
+            if c.starts_with(&self.private) || self.private.starts_with(&c) {
+                return Err(format!(
+                    "public prefix '{}' overlaps with private root '{}'",
+                    c.display(),
+                    self.private.display()
+                ));
+            }
+            if c.starts_with(&self.family) || self.family.starts_with(&c) {
+                return Err(format!(
+                    "public prefix '{}' overlaps with family root '{}'",
+                    c.display(),
+                    self.family.display()
+                ));
+            }
+            if self
+                .private_prefixes
+                .iter()
+                .any(|p| c.starts_with(p) || p.starts_with(&c))
+            {
+                return Err(format!(
+                    "public prefix '{}' overlaps with private prefix",
+                    c.display()
+                ));
+            }
+            if self
+                .family_prefixes
+                .iter()
+                .any(|p| c.starts_with(p) || p.starts_with(&c))
+            {
+                return Err(format!(
+                    "public prefix '{}' overlaps with family prefix",
+                    c.display()
+                ));
+            }
+            canonical.push(c);
+        }
+        self.public_prefixes = canonical;
+        Ok(self)
+    }
+
+    pub fn with_default_private(mut self, enabled: bool) -> Self {
+        self.default_private = enabled;
+        self
+    }
+
     pub fn with_dot_paths_private(mut self, enabled: bool) -> Self {
         self.dot_paths_private = enabled;
         self
@@ -164,6 +229,12 @@ impl ContextRoots {
         }
         if self.family_prefixes.iter().any(|p| path.starts_with(p)) {
             return Some(ContextTier::Family);
+        }
+        if self.default_private {
+            if self.public_prefixes.iter().any(|p| path.starts_with(p)) {
+                return Some(ContextTier::Public);
+            }
+            return Some(ContextTier::Private);
         }
         Some(ContextTier::Public)
     }
@@ -257,7 +328,15 @@ impl GatePolicy {
             roots.with_family_prefixes(config.paths.family_prefixes.clone())?
         };
 
-        let roots = roots.with_dot_paths_private(config.paths.dot_paths_private);
+        let roots = if config.paths.public_prefixes.is_empty() {
+            roots
+        } else {
+            roots.with_public_prefixes(config.paths.public_prefixes.clone())?
+        };
+
+        let roots = roots
+            .with_dot_paths_private(config.paths.dot_paths_private)
+            .with_default_private(config.paths.default_private);
 
         let mut channel_map = HashMap::new();
         for (channel_name, tier_name) in &config.channels.map {
@@ -1152,5 +1231,40 @@ utc_offset = 0
             },
         );
         assert!(allowed.is_allowed());
+    }
+
+    #[test]
+    fn default_private_mode_requires_explicit_public_prefix() {
+        let (base, private, family) = make_test_dirs();
+        let public = base.join("public");
+        fs::create_dir_all(&public).expect("public dir");
+
+        let roots = super::ContextRoots::new(&base, &private, &family)
+            .expect("roots")
+            .with_public_prefixes(vec![public.clone()])
+            .expect("public prefixes")
+            .with_default_private(true);
+
+        assert_eq!(
+            roots.tier_for_path(&public.join("note.txt")),
+            Some(ContextTier::Public)
+        );
+        assert_eq!(
+            roots.tier_for_path(&base.join("repo/readme.md")),
+            Some(ContextTier::Private)
+        );
+    }
+
+    #[test]
+    fn public_prefix_cannot_overlap_private_root() {
+        let (base, private, family) = make_test_dirs();
+        let nested = private.join("public-ish");
+        fs::create_dir_all(&nested).expect("nested");
+
+        let roots = super::ContextRoots::new(&base, &private, &family).expect("roots");
+        let err = roots
+            .with_public_prefixes(vec![nested])
+            .expect_err("must reject overlap");
+        assert!(err.contains("overlaps with private root"));
     }
 }
