@@ -33,6 +33,7 @@ impl CoreLoop {
         E: FnMut(&Action) -> Effect,
     {
         let context = self.policy.context_for_channel(stimulus.channel);
+        let ingress_integrity = self.policy.integrity_for_channel(stimulus.channel);
         let schedule_verdict = self.policy.check_schedule(context);
         let mut effects = Vec::new();
 
@@ -43,7 +44,7 @@ impl CoreLoop {
 
             let gas_before = self.gas_remaining;
 
-            // Chain: schedule -> action-kind -> tool-id -> skill-id -> primitive action checks
+            // Chain: schedule -> action-kind -> tool-id -> skill-id -> ingress-integrity -> primitive action checks
             let mut verdict = if !schedule_verdict.is_allowed() {
                 schedule_verdict.clone()
             } else {
@@ -62,7 +63,14 @@ impl CoreLoop {
                         if !skill_identity_verdict.is_allowed() {
                             skill_identity_verdict
                         } else {
-                            self.policy.check_action(context, &action)
+                            let ingress_verdict = self
+                                .policy
+                                .check_ingress_integrity(ingress_integrity, &action);
+                            if !ingress_verdict.is_allowed() {
+                                ingress_verdict
+                            } else {
+                                self.policy.check_action(context, &action)
+                            }
                         }
                     }
                 }
@@ -482,6 +490,25 @@ mod tests {
             stub_exec,
         );
         assert!(matches!(effects[0], Effect::Executed { .. }));
+    }
+
+    #[test]
+    fn untrusted_ingress_blocks_exec_even_when_exec_enabled_in_context() {
+        let (_base, roots) = make_test_env();
+        let policy = GatePolicy::new(roots, vec![]).with_exec_in_public(true);
+        let mut core = CoreLoop::new(policy, 100);
+
+        let effects = core.tick(
+            stim(Channel::TelegramPublic),
+            |_| {
+                vec![Action::Exec {
+                    command: "ls".into(),
+                }]
+            },
+            stub_exec,
+        );
+
+        assert!(matches!(effects[0], Effect::Denied { .. }));
     }
 
     #[test]

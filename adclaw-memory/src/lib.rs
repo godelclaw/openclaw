@@ -14,6 +14,7 @@ pub enum MemoryTier {
     Public,
     Family,
     Private,
+    TopSecret,
 }
 
 impl MemoryTier {
@@ -23,12 +24,17 @@ impl MemoryTier {
             Self::Public => 0,
             Self::Family => 1,
             Self::Private => 2,
+            Self::TopSecret => 3,
         }
     }
 
     #[must_use]
     pub fn can_access(self, item_tier: MemoryTier) -> bool {
-        self.rank() >= item_tier.rank()
+        match (self, item_tier) {
+            (Self::TopSecret, _) => true,
+            (Self::Private, Self::TopSecret) => true,
+            _ => self.rank() >= item_tier.rank(),
+        }
     }
 }
 
@@ -213,6 +219,34 @@ impl MemoryCortex {
             return true;
         }
         false
+    }
+
+    pub fn set_tier(
+        &mut self,
+        id: MemoryId,
+        new_tier: MemoryTier,
+        operator_approved: bool,
+    ) -> Result<bool, String> {
+        let Some(item) = self.items.get_mut(&id) else {
+            return Err(format!("memory id not found: {}", id));
+        };
+
+        let old_tier = item.tier;
+        if old_tier == new_tier {
+            return Ok(false);
+        }
+
+        let is_demotion = new_tier.rank() < old_tier.rank();
+        if is_demotion && !operator_approved {
+            if old_tier == MemoryTier::TopSecret {
+                return Err("top_secret downgrade requires operator approval".to_string());
+            }
+            return Err("tier downgrade requires operator approval".to_string());
+        }
+
+        item.tier = new_tier;
+        item.updated_at = now_ts();
+        Ok(true)
     }
 
     #[must_use]
@@ -838,5 +872,53 @@ mod tests {
 
         assert!(cortex.set_source_date(id, Some("2026-02-28".to_string())));
         assert!(cortex.ids_missing_source_date().is_empty());
+    }
+
+    #[test]
+    fn top_secret_downgrade_requires_operator_approval() {
+        let mut cortex = MemoryCortex::new();
+        let id = cortex.remember_at(
+            CreateMemoryInput {
+                tier: MemoryTier::Private,
+                memory_type: MemoryType::Fact,
+                summary: "Friend shared highly sensitive personal details".to_string(),
+                categories: vec!["friends".to_string()],
+                source_session: None,
+            },
+            100,
+        );
+
+        assert!(
+            cortex
+                .set_tier(id, MemoryTier::TopSecret, false)
+                .expect("promotion should work")
+        );
+
+        let no_approval = cortex.set_tier(id, MemoryTier::Private, false);
+        assert!(no_approval.is_err());
+
+        let with_approval = cortex.set_tier(id, MemoryTier::Private, true);
+        assert!(with_approval.expect("approved downgrade should work"));
+    }
+
+    #[test]
+    fn private_queries_can_access_top_secret_items() {
+        let mut cortex = MemoryCortex::new();
+        cortex.remember_at(
+            CreateMemoryInput {
+                tier: MemoryTier::TopSecret,
+                memory_type: MemoryType::Fact,
+                summary: "Top secret memory artifact".to_string(),
+                categories: vec!["top-secret".to_string()],
+                source_session: None,
+            },
+            200,
+        );
+
+        let private_hits = cortex.search("artifact", MemoryTier::Private, 10);
+        assert_eq!(private_hits.len(), 1);
+
+        let public_hits = cortex.search("artifact", MemoryTier::Public, 10);
+        assert!(public_hits.is_empty());
     }
 }

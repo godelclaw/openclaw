@@ -54,6 +54,12 @@ pub struct DaemonRequest {
     pub query: Option<String>,
     #[serde(default)]
     pub embed: Option<bool>,
+    #[serde(default)]
+    pub memory_id: Option<MemoryId>,
+    #[serde(default)]
+    pub tier: Option<String>,
+    #[serde(default)]
+    pub operator_approved: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -302,6 +308,76 @@ async fn dispatch_request(request: DaemonRequest, shared: &SharedState) -> Daemo
                 Ok(result) => DaemonResponse::ok(request.id, result),
                 Err(err) => DaemonResponse::err(request.id, format!("memory_refine failed: {err}")),
             }
+        }
+        "memory_set_tier" => {
+            let Some(stimulus_input) = request.stimulus.as_ref() else {
+                return DaemonResponse::err(
+                    request.id,
+                    "missing stimulus for method=memory_set_tier",
+                );
+            };
+
+            let stimulus = match stimulus_input.to_stimulus() {
+                Ok(stimulus) => stimulus,
+                Err(err) => return DaemonResponse::err(request.id, err),
+            };
+
+            let context = shared.policy.context_for_channel(stimulus.channel);
+            if context != ContextTier::Private {
+                return DaemonResponse::err(
+                    request.id,
+                    "memory_set_tier is only allowed from private context",
+                );
+            }
+
+            let Some(id) = request.memory_id else {
+                return DaemonResponse::err(
+                    request.id,
+                    "missing memory_id for method=memory_set_tier",
+                );
+            };
+            let Some(raw_tier) = request.tier.as_ref() else {
+                return DaemonResponse::err(request.id, "missing tier for method=memory_set_tier");
+            };
+            let Some(new_tier) = parse_memory_tier(raw_tier) else {
+                return DaemonResponse::err(
+                    request.id,
+                    format!("unknown memory tier: {}", raw_tier),
+                );
+            };
+
+            let operator_approved = request.operator_approved.unwrap_or(false);
+
+            let changed = {
+                let mut memory = shared.memory.lock().await;
+                let changed = match memory.set_tier(id, new_tier, operator_approved) {
+                    Ok(changed) => changed,
+                    Err(err) => {
+                        return DaemonResponse::err(
+                            request.id,
+                            format!("memory_set_tier failed: {err}"),
+                        );
+                    }
+                };
+
+                if changed {
+                    if let Err(err) = memory.save_json(&shared.memory_path) {
+                        eprintln!("[vericore] failed to save memory after memory_set_tier: {err}");
+                    }
+                }
+
+                changed
+            };
+
+            DaemonResponse::ok(
+                request.id,
+                json!({
+                    "id": id,
+                    "tier": new_tier,
+                    "changed": changed,
+                    "operator_approved": operator_approved
+                }),
+            )
         }
         "decide" => match request.stimulus {
             Some(input) => {
@@ -937,6 +1013,16 @@ fn memory_tier_for_context(context: ContextTier) -> MemoryTier {
         ContextTier::Public => MemoryTier::Public,
         ContextTier::Family => MemoryTier::Family,
         ContextTier::Private => MemoryTier::Private,
+    }
+}
+
+fn parse_memory_tier(raw: &str) -> Option<MemoryTier> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "public" => Some(MemoryTier::Public),
+        "family" => Some(MemoryTier::Family),
+        "private" => Some(MemoryTier::Private),
+        "top_secret" | "top-secret" | "topsecret" => Some(MemoryTier::TopSecret),
+        _ => None,
     }
 }
 

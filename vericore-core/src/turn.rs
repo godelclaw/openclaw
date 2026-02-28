@@ -6,7 +6,7 @@ use crate::executor::Executor;
 use crate::llm::{ChatMessage, LlmClient, LlmTurnResult, LlmUsage};
 use crate::policy::GatePolicy;
 use crate::tools::{parse_tool_call, tool_definitions_for_context};
-use crate::types::{ContextTier, Effect, Stimulus};
+use crate::types::{ContextTier, Effect, Stimulus, Verdict};
 
 const FINALIZE_FALLBACK_TEXT: &str = "I hit a tool-loop limit and could not safely produce a final response. Please try a more specific request.";
 
@@ -43,6 +43,7 @@ pub async fn run_turn_with_history(
     let llm = LlmClient::from_config(&config.llm).map_err(|e| e.to_string())?;
     let executor = Executor::new(&config.turn);
     let context = policy.context_for_channel(stimulus.channel);
+    let ingress_integrity = policy.integrity_for_channel(stimulus.channel);
     let tool_defs = tool_definitions_for_context(policy, context);
 
     let mut messages = Vec::with_capacity(history.len() + 2);
@@ -107,10 +108,18 @@ pub async fn run_turn_with_history(
                     attempted_tool_calls = attempted_tool_calls.saturating_add(1);
                     let result_content = match effect {
                         Effect::Executed { .. } => {
-                            tools_used.push(call.name.clone());
-                            let action_label = policy.output_label_for_action(context, action);
-                            response_label = join_label(response_label, action_label);
-                            executor.execute_tool(call).await.content
+                            let ingress_verdict =
+                                policy.check_ingress_integrity(ingress_integrity, action);
+                            match ingress_verdict {
+                                Verdict::Allow => {
+                                    tools_used.push(call.name.clone());
+                                    let action_label =
+                                        policy.output_label_for_action(context, action);
+                                    response_label = join_label(response_label, action_label);
+                                    executor.execute_tool(call).await.content
+                                }
+                                Verdict::Deny { reason } => format!("DENIED: {reason}"),
+                            }
                         }
                         Effect::Denied { reason } => format!("DENIED: {reason}"),
                     };

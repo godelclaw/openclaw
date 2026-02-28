@@ -30,6 +30,54 @@ impl ContextTier {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IntegrityTier {
+    Untrusted,
+    Reviewed,
+    Trusted,
+}
+
+impl IntegrityTier {
+    pub fn rank(self) -> u8 {
+        match self {
+            IntegrityTier::Untrusted => 0,
+            IntegrityTier::Reviewed => 1,
+            IntegrityTier::Trusted => 2,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FlowLabel {
+    pub secrecy: ContextTier,
+    pub integrity: IntegrityTier,
+}
+
+impl FlowLabel {
+    pub fn new(secrecy: ContextTier, integrity: IntegrityTier) -> Self {
+        Self { secrecy, integrity }
+    }
+
+    /// Conservative label join:
+    /// - secrecy rises (max)
+    /// - integrity drops (min)
+    pub fn join(self, other: Self) -> Self {
+        let secrecy = if self.secrecy.rank() >= other.secrecy.rank() {
+            self.secrecy
+        } else {
+            other.secrecy
+        };
+
+        let integrity = if self.integrity.rank() <= other.integrity.rank() {
+            self.integrity
+        } else {
+            other.integrity
+        };
+
+        Self { secrecy, integrity }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Channel {
     TelegramPublic,
     TelegramFamily,

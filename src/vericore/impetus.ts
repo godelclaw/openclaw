@@ -103,6 +103,13 @@ export type VeriCoreMemoryRefineResult = {
   save_error?: string | null;
 };
 
+export type VeriCoreMemorySetTierResult = {
+  id: number;
+  tier: string;
+  changed: boolean;
+  operator_approved: boolean;
+};
+
 type VeriCoreSocketResponse<T> = {
   ok: boolean;
   id?: string;
@@ -240,15 +247,16 @@ export function buildVeriCoreStimulusInput(ctx: FinalizedMsgContext): VeriCoreSt
 }
 
 async function runVeriCoreSocketMethod<T>(
-  method: "health" | "decide" | "route" | "run" | "memory_status" | "memory_query" | "memory_refine",
+  method: "health" | "decide" | "route" | "run" | "memory_status" | "memory_query" | "memory_refine" | "memory_set_tier",
   stimulus: VeriCoreStimulusInput | undefined,
   query: string | undefined,
   embed: boolean | undefined,
   options: VeriCoreBridgeOptions,
+  extraPayload?: Record<string, unknown>,
 ): Promise<T> {
   const socketPath = options.socketPath ?? resolveVeriCoreSocketPath();
   const timeoutMs = options.timeoutMs ?? DEFAULT_DECIDE_TIMEOUT_MS;
-  const requestPayload = JSON.stringify({ method, stimulus, query, embed });
+  const requestPayload = JSON.stringify({ method, stimulus, query, embed, ...(extraPayload ?? {}) });
 
   return await new Promise<T>((resolve, reject) => {
     const socket = createConnection({ path: socketPath });
@@ -609,6 +617,32 @@ export async function runVeriCoreMemoryRefine(
     undefined,
     embed,
     refineOptions,
+  );
+}
+
+export async function runVeriCoreMemorySetTier(
+  memoryId: number,
+  tier: string,
+  stimulus: VeriCoreStimulusInput,
+  operatorApproved = false,
+  options: VeriCoreBridgeOptions = {},
+): Promise<VeriCoreMemorySetTierResult> {
+  const setTierOptions = {
+    ...options,
+    timeoutMs: options.timeoutMs ?? DEFAULT_DECIDE_TIMEOUT_MS,
+  };
+
+  return await runVeriCoreSocketMethod<VeriCoreMemorySetTierResult>(
+    "memory_set_tier",
+    stimulus,
+    undefined,
+    undefined,
+    setTierOptions,
+    {
+      memory_id: memoryId,
+      tier,
+      operator_approved: operatorApproved,
+    },
   );
 }
 

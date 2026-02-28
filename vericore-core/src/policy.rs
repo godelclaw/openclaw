@@ -4,7 +4,7 @@ use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::{Config, StringList, TimeWindow};
-use crate::types::{Action, Channel, ContextTier, Verdict};
+use crate::types::{Action, Channel, ContextTier, IntegrityTier, Verdict};
 
 /// Filesystem layout:
 ///
@@ -321,6 +321,16 @@ impl GatePolicy {
         self
     }
 
+    pub fn with_exec_in_family(mut self, allow: bool) -> Self {
+        self.allow_exec_in_family = allow;
+        self
+    }
+
+    pub fn with_exec_in_public(mut self, allow: bool) -> Self {
+        self.allow_exec_in_public = allow;
+        self
+    }
+
     /// Back-compat helper: this configures primitive action-kind gating.
     pub fn with_tool_gating(
         mut self,
@@ -396,6 +406,59 @@ impl GatePolicy {
             Channel::TelegramPublic | Channel::Api | Channel::Moltbook => ContextTier::Public,
             Channel::TelegramFamily => ContextTier::Family,
             Channel::TelegramDm | Channel::Internal | Channel::Terminal => ContextTier::Private,
+        }
+    }
+
+    pub fn integrity_for_channel(&self, channel: Channel) -> IntegrityTier {
+        match self.context_for_channel(channel) {
+            ContextTier::Public => IntegrityTier::Untrusted,
+            ContextTier::Family => IntegrityTier::Reviewed,
+            ContextTier::Private => IntegrityTier::Trusted,
+        }
+    }
+
+    /// Ingress integrity check for sensitive mutations.
+    ///
+    /// Rules:
+    /// - exec requires trusted ingress
+    /// - writes to private files require trusted ingress
+    /// - writes to sensitive config paths require trusted ingress
+    pub fn check_ingress_integrity(&self, integrity: IntegrityTier, action: &Action) -> Verdict {
+        let primitive = action.executable_action();
+
+        match primitive {
+            Action::Exec { .. } => {
+                if integrity == IntegrityTier::Trusted {
+                    Verdict::allow()
+                } else {
+                    Verdict::deny(format!(
+                        "ingress integrity {:?} cannot execute commands",
+                        integrity
+                    ))
+                }
+            }
+            Action::WriteFile { path, .. } => {
+                let canonical = match canonicalize_write_target(path) {
+                    Ok(p) => p,
+                    Err(_) => return Verdict::allow(),
+                };
+
+                let target_tier = self.roots.tier_for_path(&canonical);
+                let is_private_write = matches!(target_tier, Some(ContextTier::Private));
+                let is_sensitive_config = is_sensitive_config_path(&canonical);
+
+                if (is_private_write || is_sensitive_config) && integrity != IntegrityTier::Trusted
+                {
+                    Verdict::deny(format!(
+                        "ingress integrity {:?} cannot perform sensitive write: {}",
+                        integrity,
+                        canonical.display()
+                    ))
+                } else {
+                    Verdict::allow()
+                }
+            }
+            _ => Verdict::allow(),
         }
     }
 
@@ -779,6 +842,30 @@ fn has_dot_component_within_home(path: &Path, home_root: &Path) -> bool {
     })
 }
 
+fn is_sensitive_config_path(path: &Path) -> bool {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.to_ascii_lowercase());
+
+    if let Some(name) = file_name {
+        if matches!(
+            name.as_str(),
+            "openclaw.json" | "vericore.toml" | ".env" | "agents.md" | "soul.md"
+        ) {
+            return true;
+        }
+    }
+
+    path.components().any(|component| {
+        let value = component.as_os_str().to_string_lossy();
+        value == ".BGIseed-state"
+            || value == "credentials"
+            || value == "vericore-core"
+            || value == "vericore.toml"
+    })
+}
+
 fn normalize_host(host: &str) -> String {
     host.trim().trim_end_matches('.').to_ascii_lowercase()
 }
@@ -788,7 +875,7 @@ mod tests {
     use std::fs;
 
     use crate::config::Config;
-    use crate::types::{Channel, ContextTier};
+    use crate::types::{Action, Channel, ContextTier, IntegrityTier};
 
     use super::GatePolicy;
 
@@ -982,5 +1069,88 @@ utc_offset = 0
                 .check_control_command(ContextTier::Family, Some("restart"))
                 .is_allowed()
         );
+    }
+
+    #[test]
+    fn integrity_mapping_follows_context_mapping() {
+        let (base, private, family) = make_test_dirs();
+        let roots = super::ContextRoots::new(&base, &private, &family).expect("roots");
+        let policy = GatePolicy::new(roots, vec![]);
+
+        assert_eq!(
+            policy.integrity_for_channel(Channel::TelegramPublic),
+            IntegrityTier::Untrusted
+        );
+        assert_eq!(
+            policy.integrity_for_channel(Channel::TelegramFamily),
+            IntegrityTier::Reviewed
+        );
+        assert_eq!(
+            policy.integrity_for_channel(Channel::TelegramDm),
+            IntegrityTier::Trusted
+        );
+    }
+
+    #[test]
+    fn untrusted_ingress_cannot_exec_or_sensitive_write() {
+        let (base, private, family) = make_test_dirs();
+        let roots = super::ContextRoots::new(&base, &private, &family).expect("roots");
+        let policy = GatePolicy::new(roots, vec![]).with_exec_in_public(true);
+
+        let exec_verdict = policy.check_ingress_integrity(
+            IntegrityTier::Untrusted,
+            &Action::Exec {
+                command: "echo hi".to_string(),
+            },
+        );
+        assert!(!exec_verdict.is_allowed());
+
+        let private_write = policy.check_ingress_integrity(
+            IntegrityTier::Untrusted,
+            &Action::WriteFile {
+                path: base.join("private/blocked.txt"),
+                content: "x".to_string(),
+            },
+        );
+        assert!(!private_write.is_allowed());
+
+        let public_write = policy.check_ingress_integrity(
+            IntegrityTier::Untrusted,
+            &Action::WriteFile {
+                path: base.join("notes.txt"),
+                content: "x".to_string(),
+            },
+        );
+        assert!(public_write.is_allowed());
+
+        let _ = family;
+    }
+
+    #[test]
+    fn trusted_ingress_can_write_sensitive_config_path() {
+        let (base, private, family) = make_test_dirs();
+        let state_dir = base.join(".BGIseed-state");
+        fs::create_dir_all(&state_dir).expect("state dir");
+
+        let roots = super::ContextRoots::new(&base, &private, &family).expect("roots");
+        let policy = GatePolicy::new(roots, vec![]);
+
+        let denied = policy.check_ingress_integrity(
+            IntegrityTier::Untrusted,
+            &Action::WriteFile {
+                path: state_dir.join("openclaw.json"),
+                content: "{}".to_string(),
+            },
+        );
+        assert!(!denied.is_allowed());
+
+        let allowed = policy.check_ingress_integrity(
+            IntegrityTier::Trusted,
+            &Action::WriteFile {
+                path: state_dir.join("openclaw.json"),
+                content: "{}".to_string(),
+            },
+        );
+        assert!(allowed.is_allowed());
     }
 }

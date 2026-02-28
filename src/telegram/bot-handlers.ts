@@ -28,11 +28,13 @@ import { resolveThreadSessionKeys } from "../routing/session-key.js";
 import {
   runVeriCoreMemoryQuery,
   runVeriCoreMemoryRefine,
+  runVeriCoreMemorySetTier,
   runVeriCoreMemoryStatus,
   runVeriCoreStimulusRoute,
   runVeriCoreStimulusRun,
   type VeriCoreMemoryQueryResult,
   type VeriCoreMemoryRefineResult,
+  type VeriCoreMemorySetTierResult,
   type VeriCoreMemoryStatus,
   type VeriCoreRoutePreference,
 } from "../vericore/impetus.js";
@@ -140,6 +142,77 @@ function parseMemoryRefineEmbedFlag(text?: string): boolean {
   return /(^|\s)(--embed|embed)(\s|$)/i.test(body);
 }
 
+function isMemoryPromoteCommand(command?: string | null): boolean {
+  if (!command) {
+    return false;
+  }
+  const normalized = command.trim().toLowerCase();
+  return (
+    normalized === "memory-promote" ||
+    normalized === "memory_promote" ||
+    normalized === "memorypromote"
+  );
+}
+
+function normalizeMemoryTierToken(raw: string): "public" | "family" | "private" | "top_secret" | undefined {
+  const normalized = raw.trim().toLowerCase();
+  if (normalized === "public") {
+    return "public";
+  }
+  if (normalized === "family") {
+    return "family";
+  }
+  if (normalized === "private") {
+    return "private";
+  }
+  if (normalized === "top_secret" || normalized === "top-secret" || normalized === "topsecret") {
+    return "top_secret";
+  }
+  return undefined;
+}
+
+function parseMemoryPromoteArgs(text?: string): {
+  memoryId?: number;
+  tier?: "public" | "family" | "private" | "top_secret";
+  operatorApproved: boolean;
+  error?: string;
+} {
+  const body = parseMemoryQueryText(text);
+  const parts = body.split(/\s+/).filter(Boolean);
+  const usage = "Usage: /memory-promote <id> <public|family|private|top_secret> [--approve]";
+  if (parts.length < 2) {
+    return { operatorApproved: false, error: usage };
+  }
+
+  const memoryId = Number(parts[0]);
+  if (!Number.isInteger(memoryId) || memoryId <= 0) {
+    return { operatorApproved: false, error: "Invalid memory id: " + parts[0] + ". " + usage };
+  }
+
+  const tier = normalizeMemoryTierToken(parts[1]);
+  if (!tier) {
+    return { operatorApproved: false, error: "Invalid tier: " + parts[1] + ". " + usage };
+  }
+
+  const operatorApproved = parts.some((part) => {
+    const token = part.trim().toLowerCase();
+    return token === "--approve" || token === "--operator-approved" || token === "approve";
+  });
+
+  return { memoryId, tier, operatorApproved };
+}
+
+function formatMemorySetTierMessage(result: VeriCoreMemorySetTierResult): string {
+  const changed = result.changed ? "yes" : "no (already set)";
+  return [
+    "VeriCore memory tier updated:",
+    "- id: " + result.id,
+    "- tier: " + result.tier,
+    "- changed: " + changed,
+    "- operator approved: " + (result.operator_approved ? "yes" : "no"),
+  ].join("\n");
+}
+
 function formatMemoryStatusMessage(status: VeriCoreMemoryStatus): string {
   const byTier = Object.entries(status.memory.by_tier)
     .map(([tier, count]) => `${tier}: ${count}`)
@@ -207,6 +280,45 @@ function hasReplyTargetMedia(msg: Message): boolean {
   const externalReply = (msg as Message & { external_reply?: Message }).external_reply;
   const replyTarget = msg.reply_to_message ?? externalReply;
   return Boolean(replyTarget && hasInboundMedia(replyTarget));
+}
+
+function extractVeriCoreContentFromMessage(msg: Message): string {
+  const parts: string[] = [];
+  const text = (msg.text ?? msg.caption ?? "").trim();
+  if (text) {
+    parts.push(text);
+  }
+
+  const replyTarget = msg.reply_to_message;
+  const replyText = (replyTarget?.text ?? replyTarget?.caption ?? "").trim();
+  if (replyText) {
+    parts.push(`[Reply context]
+${replyText}`);
+  }
+
+  if (!text) {
+    if (msg.voice) {
+      parts.push("<media:voice>");
+    } else if (msg.audio) {
+      parts.push("<media:audio>");
+    } else if (msg.video_note) {
+      parts.push("<media:video_note>");
+    } else if (msg.video) {
+      parts.push("<media:video>");
+    } else if (msg.photo?.length) {
+      parts.push("<media:photo>");
+    } else if (msg.document) {
+      parts.push("<media:document>");
+    } else if (msg.sticker) {
+      parts.push("<media:sticker>");
+    }
+  }
+
+  if (msg.location) {
+    parts.push(`[Location] lat=${msg.location.latitude}, lon=${msg.location.longitude}`);
+  }
+
+  return parts.join("\n\n").trim();
 }
 
 function resolveInboundMediaFileId(msg: Message): string | undefined {
@@ -421,7 +533,7 @@ export const registerTelegramHandlers = ({
   const buildVeriCoreStimulusForMessage = (msg: Message) => ({
     channel: resolveVeriCoreChannelForMessage(msg),
     actor: msg.from?.id ? String(msg.from.id) : (msg.from?.username ?? "unknown"),
-    content: msg.text ?? msg.caption ?? "",
+    content: extractVeriCoreContentFromMessage(msg),
     timestamp: typeof msg.date === "number" ? msg.date : Math.floor(Date.now() / 1000),
     session_key: resolveVeriCoreSessionKeyForMessage(msg),
     route_preference: resolveVeriCoreRoutePreference(),
@@ -451,6 +563,13 @@ export const registerTelegramHandlers = ({
     }
 
     const stimulusInput = buildVeriCoreStimulusForMessage(params.msg);
+
+    // If Telegram message content is effectively empty, fall back to OpenClaw's richer
+    // inbound context pipeline instead of sending metadata-only stimuli to VeriCore.
+    if (!stimulusInput.content.trim()) {
+      await params.onFallback();
+      return;
+    }
 
     let route;
     try {
@@ -532,6 +651,34 @@ export const registerTelegramHandlers = ({
         } catch (err) {
           runtime.error?.(warn(`vericore memory_refine error (falling back): ${String(err)}`));
           await params.onFallback();
+          return;
+        }
+      }
+
+      if (isMemoryPromoteCommand(route.command)) {
+        try {
+          const parsed = parseMemoryPromoteArgs(params.msg.text ?? params.msg.caption ?? "");
+          if (parsed.error || typeof parsed.memoryId === "undefined" || !parsed.tier) {
+            await sendVeriCoreDriverResponse(
+              params.msg,
+              parsed.error ??
+                "Usage: /memory-promote <id> <public|family|private|top_secret> [--approve]",
+            );
+            return;
+          }
+
+          const result = await runVeriCoreMemorySetTier(
+            parsed.memoryId,
+            parsed.tier,
+            stimulusInput,
+            parsed.operatorApproved,
+          );
+          await sendVeriCoreDriverResponse(params.msg, formatMemorySetTierMessage(result));
+          return;
+        } catch (err) {
+          const message = "memory-promote failed: " + String(err);
+          runtime.error?.(warn(message));
+          await sendVeriCoreDriverResponse(params.msg, message);
           return;
         }
       }

@@ -214,6 +214,35 @@ function buildChatCommands(): ChatCommandDefinition[] {
       category: "status",
     }),
     defineChatCommand({
+      key: "memory-promote",
+      nativeName: "memory_promote",
+      description: "Set memory tier (private-context only). Use --approve for demotions.",
+      textAliases: ["/memory-promote", "/memory_promote"],
+      acceptsArgs: true,
+      args: [
+        {
+          name: "memory_id",
+          description: "Memory ID",
+          type: "string",
+          required: true,
+        },
+        {
+          name: "tier",
+          description: "public|family|private|top_secret",
+          type: "string",
+          required: true,
+        },
+        {
+          name: "options",
+          description: "Optional: --approve",
+          type: "string",
+          required: false,
+          captureRemaining: true,
+        },
+      ],
+      category: "management",
+    }),
+    defineChatCommand({
       key: "allowlist",
       description: "List/add/remove allowlist entries.",
       textAlias: "/allowlist",
