@@ -5,9 +5,9 @@
 home_root = "/home/zarclaw"
 private = "/home/zarclaw/private"
 family = "/home/zarclaw/family"
-private_prefixes = ["/home/zarclaw/shared"]
+private_prefixes = ["/home/zarclaw/shared", "/home/zarclaw/memory"]
 family_prefixes = []
-public_prefixes = ["/home/zarclaw/public", "/home/zarclaw/repos", "/home/zarclaw/governance-reasoning-engine", "/home/zarclaw/mettaclaw"]
+public_prefixes = ["/home/zarclaw/public", "/home/zarclaw/repos", "/home/zarclaw/governance-reasoning-engine", "/home/zarclaw/mettaclaw", "/home/zarclaw/hyperon", "/home/zarclaw/mettapedia", "/home/zarclaw/godelclaw-arch", "/home/zarclaw/bounty_work", "/home/zarclaw/gmp-6.3.0"]
 dot_paths_private = true
 default_private = true
 

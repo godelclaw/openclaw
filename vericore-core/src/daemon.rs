@@ -1257,7 +1257,7 @@ async fn bootstrap_memory_from_markdown(shared: &SharedState) -> Result<(), Stri
 
     if !created_ids.is_empty() {
         let embedded = embed_and_attach_items(shared, &created_ids).await?;
-        eprintln!("[vericore] imported {imported} markdown memory items, embedded {embedded}");
+        eprintln!("[vericore] imported {imported} bootstrap memory items, embedded {embedded}");
     }
 
     Ok(())
@@ -1270,6 +1270,7 @@ fn bootstrap_markdown_files(home_root: &Path, history_root: &Path) -> Vec<PathBu
     // Private long-term notes that should remain private but be searchable in DM/family contexts.
     push_markdown_files(&home_root.join("private").join("memories"), &mut files, true);
     push_markdown_files(&home_root.join("private").join("CzechStudy"), &mut files, true);
+    push_csv_files(&home_root.join("private").join("CzechStudy"), &mut files, true);
     push_markdown_files(&history_root.join("daily"), &mut files, true);
     push_markdown_files(&history_root.join("daily-merged"), &mut files, true);
     files.retain(|p| p.is_file());
@@ -1299,7 +1300,40 @@ fn push_markdown_files(dir: &Path, out: &mut Vec<PathBuf>, recursive: bool) {
     }
 }
 
+fn push_csv_files(dir: &Path, out: &mut Vec<PathBuf>, recursive: bool) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_file()
+            && path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("csv"))
+        {
+            out.push(path);
+            continue;
+        }
+        if recursive && path.is_dir() {
+            push_csv_files(&path, out, true);
+        }
+    }
+}
+
 fn extract_bootstrap_entries(path: &Path) -> Result<Vec<BootstrapEntry>, String> {
+    let extension = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase())
+        .unwrap_or_default();
+    if extension == "csv" {
+        return extract_bootstrap_entries_csv(path);
+    }
+    extract_bootstrap_entries_markdown(path)
+}
+
+fn extract_bootstrap_entries_markdown(path: &Path) -> Result<Vec<BootstrapEntry>, String> {
     let text = fs::read_to_string(path)
         .map_err(|e| format!("read bootstrap memory file {}: {e}", path.display()))?;
 
@@ -1372,6 +1406,95 @@ fn extract_bootstrap_entries(path: &Path) -> Result<Vec<BootstrapEntry>, String>
             ts: current_ts,
             source_date: current_day.clone(),
             memory_type,
+            categories,
+        });
+
+        if entries.len() >= BOOTSTRAP_MAX_ITEMS_PER_FILE {
+            break;
+        }
+    }
+
+    Ok(entries)
+}
+
+fn extract_bootstrap_entries_csv(path: &Path) -> Result<Vec<BootstrapEntry>, String> {
+    let text = fs::read_to_string(path)
+        .map_err(|e| format!("read bootstrap csv file {}: {e}", path.display()))?;
+
+    let default_day = infer_day_from_filename(path);
+    let mut current_ts = default_day
+        .as_deref()
+        .and_then(day_to_ts)
+        .unwrap_or_else(now_ts);
+    let mut current_day = default_day.clone();
+
+    let mut lines = text.lines().map(str::trim).filter(|line| !line.is_empty());
+    let header_line = lines.next().unwrap_or("");
+    let headers: Vec<String> = header_line
+        .split(',')
+        .map(|h| h.trim().trim_matches('"').to_string())
+        .collect();
+
+    let mut entries = Vec::new();
+    let mut seen = HashSet::new();
+
+    for raw in lines {
+        if raw.starts_with('#') {
+            continue;
+        }
+
+        if let Some(ts) = parse_ts_from_text(raw) {
+            current_ts = ts;
+            current_day = Some(ts_to_utc(ts).date_naive().format("%Y-%m-%d").to_string());
+        } else if let Some(day) = find_day_in_text(raw) {
+            current_ts = day_to_ts(&day).unwrap_or(current_ts);
+            current_day = Some(day);
+        }
+
+        let cols: Vec<String> = raw
+            .split(',')
+            .map(|c| c.trim().trim_matches('"').to_string())
+            .collect();
+
+        let candidate = if !headers.is_empty() && headers.len() == cols.len() {
+            headers
+                .iter()
+                .zip(cols.iter())
+                .filter(|(_, v)| !v.is_empty())
+                .take(6)
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join("; ")
+        } else {
+            raw.to_string()
+        };
+
+        if candidate.len() < 18 {
+            continue;
+        }
+
+        let normalized = candidate.to_lowercase();
+        if !seen.insert(normalized) {
+            continue;
+        }
+
+        let mut categories = vec!["bootstrap".to_string(), "csv".to_string()];
+        let path_str = path.display().to_string();
+        if path_str.contains("CzechStudy") {
+            categories.push("czech-study".to_string());
+        }
+        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+            categories.push(format!("file:{stem}"));
+        }
+        if let Some(day) = &current_day {
+            categories.push(format!("date:{day}"));
+        }
+
+        entries.push(BootstrapEntry {
+            summary: truncate_chars(&candidate, BOOTSTRAP_MAX_LINE_CHARS),
+            ts: current_ts,
+            source_date: current_day.clone(),
+            memory_type: MemoryType::ProjectState,
             categories,
         });
 
