@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use adclaw_memory::{MemoryCortex, MemoryTier, TurnEvent};
+use adclaw_memory::{CreateMemoryInput, MemoryCortex, MemoryId, MemoryTier, MemoryType, TurnEvent};
 use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -28,6 +28,11 @@ const MEMORY_QUERY_LIMIT: usize = 6;
 const MEMORY_HOT_LIMIT: usize = 4;
 const MEMORY_HOT_MIN_REINFORCEMENT: u32 = 2;
 const MEMORY_MAX_SUMMARY_CHARS: usize = 220;
+const OLLAMA_EMBED_TIMEOUT_SECS: u64 = 2;
+const OLLAMA_EMBED_DEFAULT_MODEL: &str = "nomic-embed-text";
+const OLLAMA_EMBED_DEFAULT_URL: &str = "http://127.0.0.1:11434/api/embeddings";
+const BOOTSTRAP_MAX_LINE_CHARS: usize = 320;
+const BOOTSTRAP_MAX_ITEMS_PER_FILE: usize = 200;
 const HISTORY_MAX_USER_CHARS: usize = 800;
 const HISTORY_MAX_ASSISTANT_CHARS: usize = 1200;
 
@@ -38,6 +43,8 @@ pub struct DaemonRequest {
     pub id: Option<String>,
     #[serde(default)]
     pub stimulus: Option<StimulusInput>,
+    #[serde(default)]
+    pub query: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -146,6 +153,13 @@ pub fn serve(config_path: &Path, socket_path: &Path) -> Result<(), String> {
             history_root,
         });
 
+        if let Err(err) = bootstrap_memory_from_markdown(&shared).await {
+            eprintln!("[vericore] memory bootstrap warning: {err}");
+        }
+        if let Err(err) = backfill_missing_embeddings(&shared).await {
+            eprintln!("[vericore] embedding backfill warning: {err}");
+        }
+
         loop {
             let (stream, _addr) = match listener.accept().await {
                 Ok(pair) => pair,
@@ -210,6 +224,44 @@ async fn dispatch_request(request: DaemonRequest, shared: &SharedState) -> Daemo
                     }
                 }),
             )
+        }
+        "memory_query" => {
+            let Some(query) = request.query.filter(|q| !q.trim().is_empty()) else {
+                return DaemonResponse::err(request.id, "missing query for method=memory_query");
+            };
+
+            let tier = request
+                .stimulus
+                .as_ref()
+                .and_then(|s| s.to_stimulus().ok())
+                .map(|s| shared.policy.context_for_channel(s.channel))
+                .map(memory_tier_for_context)
+                .unwrap_or(MemoryTier::Private);
+
+            let query_embedding = fetch_ollama_embedding(&query).await.ok();
+
+            let hits = {
+                let memory = shared.memory.lock().await;
+                memory.search_hybrid(&query, query_embedding.as_deref(), tier, 10)
+            };
+
+            let payload: Vec<Value> = hits
+                .into_iter()
+                .map(|hit| {
+                    json!({
+                        "id": hit.item.id,
+                        "score": hit.score,
+                        "tier": hit.item.tier,
+                        "type": hit.item.memory_type,
+                        "summary": hit.item.summary,
+                        "categories": hit.item.categories,
+                        "source_date": hit.item.source_date,
+                        "reinforcement_count": hit.item.reinforcement_count,
+                    })
+                })
+                .collect();
+
+            DaemonResponse::ok(request.id, json!({"query": query, "tier": tier, "hits": payload}))
         }
         "decide" => match request.stimulus {
             Some(input) => {
@@ -286,9 +338,15 @@ async fn dispatch_request(request: DaemonRequest, shared: &SharedState) -> Daemo
 
                 let context = shared.policy.context_for_channel(stimulus.channel);
                 let memory_tier = memory_tier_for_context(context);
+                let query_embedding = fetch_ollama_embedding(&stimulus.content).await.ok();
                 let (memory_block, memory_context_items, memory_total_before) = {
                     let memory = shared.memory.lock().await;
-                    let block = build_memory_context_block(&memory, &stimulus.content, memory_tier);
+                    let block = build_memory_context_block(
+                        &memory,
+                        &stimulus.content,
+                        query_embedding.as_deref(),
+                        memory_tier,
+                    );
                     let total = memory.stats().total_items;
                     (block.text, block.item_count, total)
                 };
@@ -325,13 +383,20 @@ async fn dispatch_request(request: DaemonRequest, shared: &SharedState) -> Daemo
                             tier: memory_tier,
                         };
 
-                        let (created_memory_items, memory_total_after, memory_save_error) = {
+                        let (created_ids, created_memory_items, memory_total_after, memory_save_error) = {
                             let mut memory = shared.memory.lock().await;
                             let created = memory.ingest_turn(turn_event.clone());
+                            let created_count = created.len();
                             let save_error = memory.save_json(&shared.memory_path).err();
                             let total = memory.stats().total_items;
-                            (created.len(), total, save_error)
+                            (created, created_count, total, save_error)
                         };
+
+                        if !created_ids.is_empty() {
+                            if let Err(err) = embed_and_attach_items(shared, &created_ids).await {
+                                eprintln!("[vericore] embed created memory warning: {err}");
+                            }
+                        }
 
                         let history_write =
                             append_and_compact_history(&shared.history_root, &turn_event)
@@ -624,6 +689,10 @@ fn ts_to_utc(ts: i64) -> DateTime<Utc> {
     DateTime::from_timestamp(ts, 0).unwrap_or_else(Utc::now)
 }
 
+fn now_ts() -> i64 {
+    Utc::now().timestamp()
+}
+
 fn count_markdown_files(dir: &Path) -> usize {
     let Ok(entries) = fs::read_dir(dir) else {
         return 0;
@@ -686,12 +755,13 @@ struct MemoryContextBlock {
 fn build_memory_context_block(
     memory: &MemoryCortex,
     query: &str,
+    query_embedding: Option<&[f32]>,
     tier: MemoryTier,
 ) -> MemoryContextBlock {
     let mut lines: Vec<String> = Vec::new();
     let mut seen: HashSet<u64> = HashSet::new();
 
-    for hit in memory.search(query, tier, MEMORY_QUERY_LIMIT) {
+    for hit in memory.search_hybrid(query, query_embedding, tier, MEMORY_QUERY_LIMIT) {
         if seen.insert(hit.item.id) {
             lines.push(format_memory_line(&hit.item.summary, &hit.item.categories));
         }
@@ -750,6 +820,344 @@ fn truncate_chars(text: &str, max_chars: usize) -> String {
         out.push_str("...");
     }
     out
+}
+
+#[derive(Debug, Serialize)]
+struct OllamaEmbeddingRequest<'a> {
+    model: &'a str,
+    prompt: &'a str,
+}
+
+#[derive(Debug, Deserialize)]
+struct OllamaEmbeddingResponse {
+    embedding: Vec<f32>,
+}
+
+#[derive(Debug, Clone)]
+struct BootstrapEntry {
+    summary: String,
+    ts: i64,
+    source_date: Option<String>,
+    memory_type: MemoryType,
+    categories: Vec<String>,
+}
+
+async fn fetch_ollama_embedding(text: &str) -> Result<Vec<f32>, String> {
+    let url = std::env::var("VERICORE_EMBED_URL")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| OLLAMA_EMBED_DEFAULT_URL.to_string());
+    let model = std::env::var("VERICORE_EMBED_MODEL")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| OLLAMA_EMBED_DEFAULT_MODEL.to_string());
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(OLLAMA_EMBED_TIMEOUT_SECS))
+        .build()
+        .map_err(|e| format!("create embedding client: {e}"))?;
+    let response = client
+        .post(url)
+        .json(&OllamaEmbeddingRequest {
+            model: &model,
+            prompt: text,
+        })
+        .send()
+        .await
+        .map_err(|e| format!("embedding request failed: {e}"))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!("embedding request HTTP {}: {}", status, body));
+    }
+
+    let parsed: OllamaEmbeddingResponse = response
+        .json()
+        .await
+        .map_err(|e| format!("parse embedding response: {e}"))?;
+    if parsed.embedding.is_empty() {
+        return Err("embedding response returned empty vector".to_string());
+    }
+    Ok(parsed.embedding)
+}
+
+async fn embed_and_attach_items(shared: &SharedState, ids: &[MemoryId]) -> Result<usize, String> {
+    let to_embed: Vec<(MemoryId, String)> = {
+        let memory = shared.memory.lock().await;
+        ids.iter()
+            .filter_map(|id| memory.get(*id).map(|item| (*id, item.summary.clone())))
+            .collect()
+    };
+
+    if to_embed.is_empty() {
+        return Ok(0);
+    }
+
+    let mut embedded = 0usize;
+    let mut pending: Vec<(MemoryId, Vec<f32>)> = Vec::new();
+    for (id, summary) in to_embed {
+        match fetch_ollama_embedding(&summary).await {
+            Ok(vec) => pending.push((id, vec)),
+            Err(err) => eprintln!("[vericore] embedding skipped for item {id}: {err}"),
+        }
+    }
+
+    if pending.is_empty() {
+        return Ok(0);
+    }
+
+    {
+        let mut memory = shared.memory.lock().await;
+        for (id, vec) in pending {
+            if memory.set_embedding(id, vec) {
+                embedded = embedded.saturating_add(1);
+            }
+        }
+        if let Err(err) = memory.save_json(&shared.memory_path) {
+            eprintln!("[vericore] failed to save memory after embedding: {err}");
+        }
+    }
+
+    Ok(embedded)
+}
+
+async fn backfill_missing_embeddings(shared: &SharedState) -> Result<(), String> {
+    let missing = {
+        let memory = shared.memory.lock().await;
+        memory.ids_missing_embeddings()
+    };
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let count = embed_and_attach_items(shared, &missing).await?;
+    eprintln!("[vericore] embedded {count} existing memory items");
+    Ok(())
+}
+
+async fn bootstrap_memory_from_markdown(shared: &SharedState) -> Result<(), String> {
+    let files = bootstrap_markdown_files(&shared.config.paths.home_root, &shared.history_root);
+    if files.is_empty() {
+        return Ok(());
+    }
+
+    let mut created_ids: Vec<MemoryId> = Vec::new();
+    let mut imported = 0usize;
+    for path in files {
+        let entries = extract_bootstrap_entries(&path)?;
+        if entries.is_empty() {
+            continue;
+        }
+
+        {
+            let mut memory = shared.memory.lock().await;
+            for entry in entries {
+                let (id, created) = memory.remember_if_new_at(
+                    CreateMemoryInput {
+                        tier: MemoryTier::Private,
+                        memory_type: entry.memory_type,
+                        summary: entry.summary,
+                        categories: entry.categories,
+                        source_session: Some(format!("bootstrap:{}", path.display())),
+                    },
+                    entry.ts,
+                );
+                if memory.set_source_date(id, entry.source_date.clone()) {
+                    // no-op
+                }
+                if created {
+                    created_ids.push(id);
+                    imported = imported.saturating_add(1);
+                }
+            }
+            if let Err(err) = memory.save_json(&shared.memory_path) {
+                eprintln!("[vericore] failed to save memory after bootstrap import: {err}");
+            }
+        }
+    }
+
+    if !created_ids.is_empty() {
+        let embedded = embed_and_attach_items(shared, &created_ids).await?;
+        eprintln!("[vericore] imported {imported} markdown memory items, embedded {embedded}");
+    }
+
+    Ok(())
+}
+
+fn bootstrap_markdown_files(home_root: &Path, history_root: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    files.push(home_root.join("MEMORY.md"));
+    push_markdown_files(&home_root.join("memory"), &mut files, false);
+    push_markdown_files(&history_root.join("daily"), &mut files, true);
+    push_markdown_files(&history_root.join("daily-merged"), &mut files, true);
+    files.retain(|p| p.is_file());
+    files.sort();
+    files.dedup();
+    files
+}
+
+fn push_markdown_files(dir: &Path, out: &mut Vec<PathBuf>, recursive: bool) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_file()
+            && path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
+        {
+            out.push(path);
+            continue;
+        }
+        if recursive && path.is_dir() {
+            push_markdown_files(&path, out, true);
+        }
+    }
+}
+
+fn extract_bootstrap_entries(path: &Path) -> Result<Vec<BootstrapEntry>, String> {
+    let text = fs::read_to_string(path)
+        .map_err(|e| format!("read bootstrap memory file {}: {e}", path.display()))?;
+
+    let default_day = infer_day_from_filename(path);
+    let mut current_ts = default_day
+        .as_deref()
+        .and_then(day_to_ts)
+        .unwrap_or_else(|| now_ts());
+    let mut current_day = default_day.clone();
+    let mut entries = Vec::new();
+    let mut seen = HashSet::new();
+
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        if line.starts_with("## ") || line.starts_with("# ") {
+            if let Some(ts) = parse_ts_from_text(line) {
+                current_ts = ts;
+                current_day = Some(ts_to_utc(ts).date_naive().format("%Y-%m-%d").to_string());
+            } else if let Some(day) = find_day_in_text(line) {
+                current_ts = day_to_ts(&day).unwrap_or(current_ts);
+                current_day = Some(day);
+            }
+            continue;
+        }
+
+        let candidate = if let Some(body) = line.strip_prefix("- ") {
+            body.trim()
+        } else if let Some(body) = line.strip_prefix("* ") {
+            body.trim()
+        } else {
+            continue;
+        };
+
+        if candidate.len() < 18 {
+            continue;
+        }
+        let normalized = candidate.to_lowercase();
+        if !seen.insert(normalized) {
+            continue;
+        }
+
+        let trimmed = truncate_chars(candidate, BOOTSTRAP_MAX_LINE_CHARS);
+        let mut categories = vec!["bootstrap".to_string()];
+        let path_str = path.display().to_string();
+        if path_str.contains("/history/") {
+            categories.push("history".to_string());
+        }
+        if path_str.contains("/daily/") {
+            categories.push("daily".to_string());
+        }
+        if path_str.contains("/daily-merged/") {
+            categories.push("daily-merged".to_string());
+        }
+        if let Some(day) = &current_day {
+            categories.push(format!("date:{day}"));
+        }
+
+        let memory_type = if path_str.contains("/history/") {
+            MemoryType::Event
+        } else {
+            MemoryType::ProjectState
+        };
+
+        entries.push(BootstrapEntry {
+            summary: trimmed,
+            ts: current_ts,
+            source_date: current_day.clone(),
+            memory_type,
+            categories,
+        });
+
+        if entries.len() >= BOOTSTRAP_MAX_ITEMS_PER_FILE {
+            break;
+        }
+    }
+
+    Ok(entries)
+}
+
+fn infer_day_from_filename(path: &Path) -> Option<String> {
+    let stem = path.file_stem()?.to_str()?;
+    if stem.len() == 10 && is_ymd(stem) {
+        Some(stem.to_string())
+    } else {
+        None
+    }
+}
+
+fn parse_ts_from_text(text: &str) -> Option<i64> {
+    for token in text.split_whitespace() {
+        let cleaned = token.trim_matches(|c: char| {
+            !(c.is_ascii_alphanumeric() || c == '-' || c == ':' || c == 'T' || c == 'Z' || c == '+')
+        });
+        if let Ok(dt) = DateTime::parse_from_rfc3339(cleaned) {
+            return Some(dt.timestamp());
+        }
+    }
+    None
+}
+
+fn find_day_in_text(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    if bytes.len() < 10 {
+        return None;
+    }
+    for i in 0..=bytes.len().saturating_sub(10) {
+        let slice = &bytes[i..i + 10];
+        let Ok(day) = std::str::from_utf8(slice) else {
+            continue;
+        };
+        if is_ymd(day) && NaiveDate::parse_from_str(day, "%Y-%m-%d").is_ok() {
+            return Some(day.to_string());
+        }
+    }
+    None
+}
+
+fn is_ymd(day: &str) -> bool {
+    let b = day.as_bytes();
+    b.len() == 10
+        && b[0].is_ascii_digit()
+        && b[1].is_ascii_digit()
+        && b[2].is_ascii_digit()
+        && b[3].is_ascii_digit()
+        && b[4] == b'-'
+        && b[5].is_ascii_digit()
+        && b[6].is_ascii_digit()
+        && b[7] == b'-'
+        && b[8].is_ascii_digit()
+        && b[9].is_ascii_digit()
+}
+
+fn day_to_ts(day: &str) -> Option<i64> {
+    let date = NaiveDate::parse_from_str(day, "%Y-%m-%d").ok()?;
+    date.and_hms_opt(12, 0, 0)
+        .map(|dt| dt.and_utc().timestamp())
 }
 
 #[cfg(test)]

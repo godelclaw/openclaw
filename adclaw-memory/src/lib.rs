@@ -51,9 +51,13 @@ pub struct MemoryItem {
     pub summary: String,
     pub categories: Vec<String>,
     pub source_session: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_date: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
     pub reinforcement_count: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding: Option<Vec<f32>>,
 }
 
 #[derive(Debug, Clone)]
@@ -144,14 +148,28 @@ impl MemoryCortex {
             summary: input.summary.trim().to_string(),
             categories: normalized_categories.clone(),
             source_session: input.source_session,
+            source_date: None,
             created_at: ts,
             updated_at: ts,
             reinforcement_count: 1,
+            embedding: None,
         };
 
         self.items.insert(id, item);
         self.index_categories(id, &normalized_categories);
         id
+    }
+
+    pub fn remember_or_reinforce(&mut self, input: CreateMemoryInput) -> (MemoryId, bool) {
+        self.remember_or_reinforce_at(input, now_ts())
+    }
+
+    pub fn remember_or_reinforce_at(&mut self, input: CreateMemoryInput, ts: i64) -> (MemoryId, bool) {
+        self.remember_or_reinforce_impl(input, ts, true)
+    }
+
+    pub fn remember_if_new_at(&mut self, input: CreateMemoryInput, ts: i64) -> (MemoryId, bool) {
+        self.remember_or_reinforce_impl(input, ts, false)
     }
 
     pub fn reinforce(&mut self, id: MemoryId, ts: i64) -> bool {
@@ -166,6 +184,32 @@ impl MemoryCortex {
     #[must_use]
     pub fn get(&self, id: MemoryId) -> Option<&MemoryItem> {
         self.items.get(&id)
+    }
+
+    pub fn set_embedding(&mut self, id: MemoryId, embedding: Vec<f32>) -> bool {
+        if let Some(item) = self.items.get_mut(&id) {
+            item.embedding = Some(embedding);
+            item.updated_at = now_ts();
+            return true;
+        }
+        false
+    }
+
+    pub fn set_source_date(&mut self, id: MemoryId, source_date: Option<String>) -> bool {
+        if let Some(item) = self.items.get_mut(&id) {
+            item.source_date = source_date;
+            return true;
+        }
+        false
+    }
+
+    #[must_use]
+    pub fn ids_missing_embeddings(&self) -> Vec<MemoryId> {
+        self.items
+            .values()
+            .filter(|item| item.embedding.is_none())
+            .map(|item| item.id)
+            .collect()
     }
 
     #[must_use]
@@ -194,8 +238,19 @@ impl MemoryCortex {
 
     #[must_use]
     pub fn search(&self, query: &str, requesting_tier: MemoryTier, limit: usize) -> Vec<SearchHit> {
+        self.search_hybrid(query, None, requesting_tier, limit)
+    }
+
+    #[must_use]
+    pub fn search_hybrid(
+        &self,
+        query: &str,
+        query_embedding: Option<&[f32]>,
+        requesting_tier: MemoryTier,
+        limit: usize,
+    ) -> Vec<SearchHit> {
         let query_tokens = tokenize(query);
-        if query_tokens.is_empty() {
+        if query_tokens.is_empty() && query_embedding.is_none() {
             return Vec::new();
         }
 
@@ -204,8 +259,15 @@ impl MemoryCortex {
             .values()
             .filter(|item| requesting_tier.can_access(item.tier))
             .filter_map(|item| {
-                let score = score_item(item, &query_tokens);
-                (score > 0.0).then(|| SearchHit {
+                let lexical = lexical_score_item(item, &query_tokens);
+                let semantic = semantic_score_item(item, query_embedding).unwrap_or(0.0);
+
+                if lexical <= 0.0 && semantic <= 0.0 {
+                    return None;
+                }
+
+                let score = hybrid_score(lexical, semantic, item.reinforcement_count);
+                Some(SearchHit {
                     item: item.clone(),
                     score,
                 })
@@ -314,17 +376,24 @@ impl MemoryCortex {
         }
     }
 
-    fn remember_or_reinforce_at(&mut self, input: CreateMemoryInput, ts: i64) -> (MemoryId, bool) {
+    fn remember_or_reinforce_impl(
+        &mut self,
+        input: CreateMemoryInput,
+        ts: i64,
+        reinforce_on_duplicate: bool,
+    ) -> (MemoryId, bool) {
         if let Some(existing_id) = self.find_duplicate_candidate(&input) {
-            if let Some(existing) = self.items.get_mut(&existing_id) {
-                existing.reinforcement_count = existing.reinforcement_count.saturating_add(1);
-                existing.updated_at = ts;
-                // Keep categories rich over time while preserving deterministic normalization.
-                let mut merged = existing.categories.clone();
-                merged.extend(input.categories.iter().cloned());
-                existing.categories = normalize_categories(merged);
+            if reinforce_on_duplicate {
+                if let Some(existing) = self.items.get_mut(&existing_id) {
+                    existing.reinforcement_count = existing.reinforcement_count.saturating_add(1);
+                    existing.updated_at = ts;
+                    // Keep categories rich over time while preserving deterministic normalization.
+                    let mut merged = existing.categories.clone();
+                    merged.extend(input.categories.iter().cloned());
+                    existing.categories = normalize_categories(merged);
+                }
+                self.rebuild_indexes();
             }
-            self.rebuild_indexes();
             return (existing_id, false);
         }
 
@@ -376,7 +445,11 @@ fn tokenize(text: &str) -> HashSet<String> {
         .collect()
 }
 
-fn score_item(item: &MemoryItem, query_tokens: &HashSet<String>) -> f32 {
+fn lexical_score_item(item: &MemoryItem, query_tokens: &HashSet<String>) -> f32 {
+    if query_tokens.is_empty() {
+        return 0.0;
+    }
+
     let mut score = 0.0;
     let mut matched = false;
     let haystack_tokens = tokenize(&item.summary);
@@ -400,7 +473,37 @@ fn score_item(item: &MemoryItem, query_tokens: &HashSet<String>) -> f32 {
         return 0.0;
     }
 
-    score + (item.reinforcement_count as f32 * 0.25)
+    score
+}
+
+fn semantic_score_item(item: &MemoryItem, query_embedding: Option<&[f32]>) -> Option<f32> {
+    let query = query_embedding?;
+    let item_embedding = item.embedding.as_ref()?;
+    cosine_similarity(query, item_embedding)
+}
+
+fn hybrid_score(lexical: f32, semantic: f32, reinforcement_count: u32) -> f32 {
+    let reinforcement = (reinforcement_count as f32 + 1.0).ln();
+    lexical + (semantic.max(0.0) * 3.0) + (reinforcement * 0.4)
+}
+
+fn cosine_similarity(a: &[f32], b: &[f32]) -> Option<f32> {
+    if a.is_empty() || b.is_empty() || a.len() != b.len() {
+        return None;
+    }
+
+    let mut dot = 0.0_f32;
+    let mut na = 0.0_f32;
+    let mut nb = 0.0_f32;
+    for (x, y) in a.iter().zip(b.iter()) {
+        dot += x * y;
+        na += x * x;
+        nb += y * y;
+    }
+    if na <= 0.0 || nb <= 0.0 {
+        return None;
+    }
+    Some(dot / (na.sqrt() * nb.sqrt()))
 }
 
 fn extract_after_prefix(text: &str, prefix: &str) -> Option<String> {
