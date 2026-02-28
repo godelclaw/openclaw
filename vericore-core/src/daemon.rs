@@ -6,7 +6,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use adclaw_memory::{CreateMemoryInput, MemoryCortex, MemoryId, MemoryTier, MemoryType, TurnEvent};
+use adclaw_memory::{
+    CreateMemoryInput, MemoryCortex, MemoryId, MemoryRefineReport, MemoryTier, MemoryType,
+    TurnEvent,
+};
 use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -35,6 +38,10 @@ const BOOTSTRAP_MAX_LINE_CHARS: usize = 320;
 const BOOTSTRAP_MAX_ITEMS_PER_FILE: usize = 200;
 const HISTORY_MAX_USER_CHARS: usize = 800;
 const HISTORY_MAX_ASSISTANT_CHARS: usize = 1200;
+const MEMORY_EMBED_ON_INGEST_DEFAULT: bool = false;
+const MEMORY_EMBED_ON_STARTUP_BACKFILL_DEFAULT: bool = false;
+const MEMORY_SLEEP_INTERVAL_SECS_DEFAULT: u64 = 0;
+const MEMORY_SLEEP_EMBED_DEFAULT: bool = false;
 
 #[derive(Debug, Deserialize)]
 pub struct DaemonRequest {
@@ -45,6 +52,8 @@ pub struct DaemonRequest {
     pub stimulus: Option<StimulusInput>,
     #[serde(default)]
     pub query: Option<String>,
+    #[serde(default)]
+    pub embed: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -156,8 +165,23 @@ pub fn serve(config_path: &Path, socket_path: &Path) -> Result<(), String> {
         if let Err(err) = bootstrap_memory_from_markdown(&shared).await {
             eprintln!("[vericore] memory bootstrap warning: {err}");
         }
-        if let Err(err) = backfill_missing_embeddings(&shared).await {
-            eprintln!("[vericore] embedding backfill warning: {err}");
+        if should_embed_on_startup_backfill() {
+            if let Err(err) = backfill_missing_embeddings(&shared).await {
+                eprintln!("[vericore] embedding backfill warning: {err}");
+            }
+        }
+
+        if let Some(interval) = sleep_refine_interval() {
+            let shared_for_sleep = Arc::clone(&shared);
+            let embed_in_sleep = sleep_refine_embed();
+            eprintln!(
+                "[vericore] memory sleep refine enabled: every {}s (embed={})",
+                interval.as_secs(),
+                embed_in_sleep
+            );
+            tokio::spawn(async move {
+                run_sleep_refine_loop(shared_for_sleep, interval, embed_in_sleep).await;
+            });
         }
 
         loop {
@@ -197,9 +221,13 @@ async fn dispatch_request(request: DaemonRequest, shared: &SharedState) -> Daemo
     match request.method.as_str() {
         "health" => DaemonResponse::ok(request.id, json!({"status":"ok"})),
         "memory_status" => {
-            let stats = {
+            let (stats, missing_embeddings, missing_source_dates) = {
                 let memory = shared.memory.lock().await;
-                memory.stats()
+                (
+                    memory.stats(),
+                    memory.ids_missing_embeddings().len(),
+                    memory.ids_missing_source_date().len(),
+                )
             };
 
             let history_daily = count_markdown_files(&shared.history_root.join("daily"));
@@ -215,6 +243,8 @@ async fn dispatch_request(request: DaemonRequest, shared: &SharedState) -> Daemo
                         "total_items": stats.total_items,
                         "by_tier": stats.by_tier,
                         "by_type": stats.by_type,
+                        "missing_embeddings": missing_embeddings,
+                        "missing_source_dates": missing_source_dates,
                     },
                     "history": {
                         "root": shared.history_root.display().to_string(),
@@ -261,7 +291,17 @@ async fn dispatch_request(request: DaemonRequest, shared: &SharedState) -> Daemo
                 })
                 .collect();
 
-            DaemonResponse::ok(request.id, json!({"query": query, "tier": tier, "hits": payload}))
+            DaemonResponse::ok(
+                request.id,
+                json!({"query": query, "tier": tier, "hits": payload}),
+            )
+        }
+        "memory_refine" => {
+            let include_embeddings = request.embed.unwrap_or(false);
+            match run_memory_refine_once(shared, include_embeddings).await {
+                Ok(result) => DaemonResponse::ok(request.id, result),
+                Err(err) => DaemonResponse::err(request.id, format!("memory_refine failed: {err}")),
+            }
         }
         "decide" => match request.stimulus {
             Some(input) => {
@@ -383,18 +423,36 @@ async fn dispatch_request(request: DaemonRequest, shared: &SharedState) -> Daemo
                             tier: memory_tier,
                         };
 
-                        let (created_ids, created_memory_items, memory_total_after, memory_save_error) = {
+                        let (
+                            created_ids,
+                            created_memory_items,
+                            memory_total_after,
+                            memory_save_error,
+                        ) = {
                             let mut memory = shared.memory.lock().await;
                             let created = memory.ingest_turn(turn_event.clone());
+                            if !created.is_empty() {
+                                let source_day = ts_to_utc(turn_event.timestamp)
+                                    .date_naive()
+                                    .format("%Y-%m-%d")
+                                    .to_string();
+                                for id in &created {
+                                    let _ = memory.set_source_date(*id, Some(source_day.clone()));
+                                }
+                            }
                             let created_count = created.len();
                             let save_error = memory.save_json(&shared.memory_path).err();
                             let total = memory.stats().total_items;
                             (created, created_count, total, save_error)
                         };
 
-                        if !created_ids.is_empty() {
-                            if let Err(err) = embed_and_attach_items(shared, &created_ids).await {
-                                eprintln!("[vericore] embed created memory warning: {err}");
+                        let mut embedded_created_items = 0usize;
+                        if should_embed_on_ingest() && !created_ids.is_empty() {
+                            match embed_and_attach_items(shared, &created_ids).await {
+                                Ok(count) => embedded_created_items = count,
+                                Err(err) => {
+                                    eprintln!("[vericore] embed created memory warning: {err}")
+                                }
                             }
                         }
 
@@ -418,6 +476,10 @@ async fn dispatch_request(request: DaemonRequest, shared: &SharedState) -> Daemo
                                         "total_items_after": memory_total_after,
                                     }
                                 });
+
+                                result["memory"]["embed_on_ingest"] =
+                                    json!(should_embed_on_ingest());
+                                result["memory"]["embedded_items"] = json!(embedded_created_items);
 
                                 if let Some(err) = memory_save_error {
                                     result["memory"]["save_error"] = json!(err);
@@ -445,6 +507,137 @@ async fn dispatch_request(request: DaemonRequest, shared: &SharedState) -> Daemo
         },
         other => DaemonResponse::err(request.id, format!("unknown method: {other}")),
     }
+}
+
+fn should_embed_on_ingest() -> bool {
+    env_bool("VERICORE_EMBED_ON_INGEST", MEMORY_EMBED_ON_INGEST_DEFAULT)
+}
+
+fn should_embed_on_startup_backfill() -> bool {
+    env_bool(
+        "VERICORE_EMBED_BACKFILL_ON_START",
+        MEMORY_EMBED_ON_STARTUP_BACKFILL_DEFAULT,
+    )
+}
+
+fn sleep_refine_interval() -> Option<Duration> {
+    let secs = env_u64(
+        "VERICORE_MEMORY_SLEEP_INTERVAL_SECS",
+        MEMORY_SLEEP_INTERVAL_SECS_DEFAULT,
+    );
+    (secs > 0).then(|| Duration::from_secs(secs))
+}
+
+fn sleep_refine_embed() -> bool {
+    env_bool("VERICORE_MEMORY_SLEEP_EMBED", MEMORY_SLEEP_EMBED_DEFAULT)
+}
+
+fn env_bool(name: &str, default: bool) -> bool {
+    let Ok(raw) = std::env::var(name) else {
+        return default;
+    };
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => true,
+        "0" | "false" | "no" | "off" => false,
+        _ => default,
+    }
+}
+
+fn env_u64(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .unwrap_or(default)
+}
+
+async fn run_sleep_refine_loop(
+    shared: Arc<SharedState>,
+    interval: Duration,
+    include_embeddings: bool,
+) {
+    loop {
+        time::sleep(interval).await;
+        match run_memory_refine_once(shared.as_ref(), include_embeddings).await {
+            Ok(result) => {
+                eprintln!("[vericore] memory sleep refine: {}", result);
+            }
+            Err(err) => {
+                eprintln!("[vericore] memory sleep refine warning: {err}");
+            }
+        }
+    }
+}
+
+async fn run_memory_refine_once(
+    shared: &SharedState,
+    include_embeddings: bool,
+) -> Result<Value, String> {
+    let (refine, source_dates_filled, missing_embedding_ids, save_error) = {
+        let mut memory = shared.memory.lock().await;
+
+        let refine: MemoryRefineReport = memory.sleep_refine();
+
+        let missing_source: Vec<(MemoryId, i64)> = memory
+            .ids_missing_source_date()
+            .into_iter()
+            .filter_map(|id| memory.get(id).map(|item| (id, item.created_at)))
+            .collect();
+
+        let mut source_dates_filled = 0usize;
+        for (id, created_at) in missing_source {
+            let day = ts_to_utc(created_at)
+                .date_naive()
+                .format("%Y-%m-%d")
+                .to_string();
+            if memory.set_source_date(id, Some(day)) {
+                source_dates_filled = source_dates_filled.saturating_add(1);
+            }
+        }
+
+        let missing_embedding_ids = if include_embeddings {
+            memory.ids_missing_embeddings()
+        } else {
+            Vec::new()
+        };
+        let save_error = memory.save_json(&shared.memory_path).err();
+
+        (
+            refine,
+            source_dates_filled,
+            missing_embedding_ids,
+            save_error,
+        )
+    };
+
+    let embedded_items = if include_embeddings && !missing_embedding_ids.is_empty() {
+        embed_and_attach_items(shared, &missing_embedding_ids).await?
+    } else {
+        0
+    };
+
+    let stats_after = {
+        let memory = shared.memory.lock().await;
+        memory.stats()
+    };
+
+    Ok(json!({
+        "refine": {
+            "before_items": refine.before_items,
+            "after_items": refine.after_items,
+            "removed_items": refine.removed_items,
+            "merged_groups": refine.merged_groups,
+            "source_dates_filled": source_dates_filled,
+            "embedded_items": embedded_items,
+            "embed_requested": include_embeddings,
+        },
+        "memory": {
+            "file": shared.memory_path.display().to_string(),
+            "total_items": stats_after.total_items,
+            "by_tier": stats_after.by_tier,
+            "by_type": stats_after.by_type,
+        },
+        "save_error": save_error,
+    }))
 }
 
 fn trim_history(mut history: Vec<ChatMessage>, limit: usize) -> Vec<ChatMessage> {

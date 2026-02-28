@@ -85,6 +85,14 @@ pub struct SearchHit {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryRefineReport {
+    pub before_items: usize,
+    pub after_items: usize,
+    pub removed_items: usize,
+    pub merged_groups: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CortexStats {
     pub total_items: usize,
     pub by_tier: HashMap<MemoryTier, usize>,
@@ -164,7 +172,11 @@ impl MemoryCortex {
         self.remember_or_reinforce_at(input, now_ts())
     }
 
-    pub fn remember_or_reinforce_at(&mut self, input: CreateMemoryInput, ts: i64) -> (MemoryId, bool) {
+    pub fn remember_or_reinforce_at(
+        &mut self,
+        input: CreateMemoryInput,
+        ts: i64,
+    ) -> (MemoryId, bool) {
         self.remember_or_reinforce_impl(input, ts, true)
     }
 
@@ -210,6 +222,102 @@ impl MemoryCortex {
             .filter(|item| item.embedding.is_none())
             .map(|item| item.id)
             .collect()
+    }
+
+    #[must_use]
+    pub fn ids_missing_source_date(&self) -> Vec<MemoryId> {
+        self.items
+            .values()
+            .filter(|item| item.source_date.is_none())
+            .map(|item| item.id)
+            .collect()
+    }
+
+    /// Deterministic offline maintenance pass.
+    ///
+    /// This is intended for low-frequency "sleep" windows. It does no network calls
+    /// and only merges strongly equivalent memories (same tier/type/normalized summary).
+    pub fn sleep_refine(&mut self) -> MemoryRefineReport {
+        let before_items = self.items.len();
+        let mut buckets: HashMap<(MemoryTier, MemoryType, String), Vec<MemoryId>> = HashMap::new();
+
+        for item in self.items.values() {
+            let norm = normalize_summary_for_dedupe(&item.summary);
+            if norm.is_empty() {
+                continue;
+            }
+            buckets
+                .entry((item.tier, item.memory_type.clone(), norm))
+                .or_default()
+                .push(item.id);
+        }
+
+        let mut merge_pairs: Vec<(MemoryId, MemoryId)> = Vec::new();
+        let mut merged_groups = 0usize;
+
+        for mut ids in buckets.into_values() {
+            if ids.len() <= 1 {
+                continue;
+            }
+
+            ids.sort_by_key(|id| {
+                self.items
+                    .get(id)
+                    .map(|item| {
+                        (
+                            std::cmp::Reverse(item.reinforcement_count),
+                            std::cmp::Reverse(item.updated_at),
+                            *id,
+                        )
+                    })
+                    .unwrap_or((std::cmp::Reverse(0_u32), std::cmp::Reverse(0_i64), *id))
+            });
+
+            let canonical_id = ids[0];
+            for duplicate_id in ids.into_iter().skip(1) {
+                merge_pairs.push((canonical_id, duplicate_id));
+            }
+            merged_groups = merged_groups.saturating_add(1);
+        }
+
+        for (canonical_id, duplicate_id) in merge_pairs {
+            let Some(duplicate) = self.items.remove(&duplicate_id) else {
+                continue;
+            };
+            let Some(canonical) = self.items.get_mut(&canonical_id) else {
+                continue;
+            };
+
+            canonical.reinforcement_count = canonical
+                .reinforcement_count
+                .saturating_add(duplicate.reinforcement_count);
+            canonical.created_at = canonical.created_at.min(duplicate.created_at);
+            canonical.updated_at = canonical.updated_at.max(duplicate.updated_at);
+
+            if canonical.source_session.is_none() {
+                canonical.source_session = duplicate.source_session.clone();
+            }
+            if canonical.source_date.is_none() {
+                canonical.source_date = duplicate.source_date.clone();
+            }
+            if canonical.embedding.is_none() {
+                canonical.embedding = duplicate.embedding.clone();
+            }
+
+            let mut categories = canonical.categories.clone();
+            categories.extend(duplicate.categories.iter().cloned());
+            canonical.categories = normalize_categories(categories);
+        }
+
+        self.rebuild_indexes();
+
+        let after_items = self.items.len();
+        MemoryRefineReport {
+            before_items,
+            after_items,
+            removed_items: before_items.saturating_sub(after_items),
+            merged_groups,
+        }
     }
 
     #[must_use]
@@ -673,5 +781,62 @@ mod tests {
         assert!(loaded.get(id).is_some());
         let hits = loaded.search("travel", MemoryTier::Family, 10);
         assert_eq!(hits.first().map(|hit| hit.item.id), Some(id));
+    }
+
+    #[test]
+    fn sleep_refine_merges_exact_duplicates() {
+        let mut cortex = MemoryCortex::new();
+        let _a = cortex.remember_at(
+            CreateMemoryInput {
+                tier: MemoryTier::Private,
+                memory_type: MemoryType::ProjectState,
+                summary: "Weekly deploy preference remains reliability-first".to_string(),
+                categories: vec!["deploy".to_string()],
+                source_session: Some("telegram:1".to_string()),
+            },
+            100,
+        );
+        let _b = cortex.remember_at(
+            CreateMemoryInput {
+                tier: MemoryTier::Private,
+                memory_type: MemoryType::ProjectState,
+                summary: "weekly deploy preference remains reliability first".to_string(),
+                categories: vec!["reliability".to_string()],
+                source_session: Some("telegram:2".to_string()),
+            },
+            101,
+        );
+
+        let report = cortex.sleep_refine();
+        assert_eq!(report.before_items, 2);
+        assert_eq!(report.after_items, 1);
+        assert_eq!(report.removed_items, 1);
+
+        let hits = cortex.search("weekly deploy reliability", MemoryTier::Private, 5);
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].item.reinforcement_count >= 2);
+        assert!(hits[0].item.categories.iter().any(|c| c == "deploy"));
+        assert!(hits[0].item.categories.iter().any(|c| c == "reliability"));
+    }
+
+    #[test]
+    fn ids_missing_source_date_reports_items_without_dates() {
+        let mut cortex = MemoryCortex::new();
+        let id = cortex.remember_at(
+            CreateMemoryInput {
+                tier: MemoryTier::Private,
+                memory_type: MemoryType::Fact,
+                summary: "User stated timezone: CET".to_string(),
+                categories: vec!["profile".to_string()],
+                source_session: None,
+            },
+            123,
+        );
+
+        let missing = cortex.ids_missing_source_date();
+        assert_eq!(missing, vec![id]);
+
+        assert!(cortex.set_source_date(id, Some("2026-02-28".to_string())));
+        assert!(cortex.ids_missing_source_date().is_empty());
     }
 }
