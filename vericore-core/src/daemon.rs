@@ -1267,6 +1267,9 @@ fn bootstrap_markdown_files(home_root: &Path, history_root: &Path) -> Vec<PathBu
     let mut files = Vec::new();
     files.push(home_root.join("MEMORY.md"));
     push_markdown_files(&home_root.join("memory"), &mut files, false);
+    // Private long-term notes that should remain private but be searchable in DM/family contexts.
+    push_markdown_files(&home_root.join("private").join("memories"), &mut files, true);
+    push_markdown_files(&home_root.join("private").join("CzechStudy"), &mut files, true);
     push_markdown_files(&history_root.join("daily"), &mut files, true);
     push_markdown_files(&history_root.join("daily-merged"), &mut files, true);
     files.retain(|p| p.is_file());
