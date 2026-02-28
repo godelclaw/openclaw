@@ -94,4 +94,17 @@ export function buildEmbeddedExtensionFactories(params: {
   return factories;
 }
 
+export function buildEmbeddedExtensionPaths(params: {
+  cfg: OpenClawConfig | undefined;
+  sessionManager: SessionManager;
+  provider: string;
+  modelId: string;
+  model: Model<Api> | undefined;
+}): string[] {
+  // Compatibility shim for older callers that relied on path-returning API.
+  // Side effects are preserved via buildEmbeddedExtensionFactories.
+  buildEmbeddedExtensionFactories(params);
+  return [];
+}
+
 export { ensurePiCompactionReserveTokens };

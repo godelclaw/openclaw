@@ -276,6 +276,16 @@ export function stripPluginOnlyAllowlist(
   };
 }
 
+export function mergeAlsoAllowPolicy<TPolicy extends { allow?: string[] }>(
+  policy: TPolicy | undefined,
+  alsoAllow?: string[],
+): TPolicy | undefined {
+  if (!policy?.allow || !Array.isArray(alsoAllow) || alsoAllow.length === 0) {
+    return policy;
+  }
+  return { ...policy, allow: Array.from(new Set([...policy.allow, ...alsoAllow])) };
+}
+
 export function resolveToolProfilePolicy(profile?: string): ToolProfilePolicy | undefined {
   if (!profile) {
     return undefined;
