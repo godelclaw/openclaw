@@ -25,6 +25,11 @@ import { MediaFetchError } from "../media/fetch.js";
 import { readChannelAllowFromStore } from "../pairing/pairing-store.js";
 import { resolveAgentRoute } from "../routing/resolve-route.js";
 import { resolveThreadSessionKeys } from "../routing/session-key.js";
+import {
+  runVeriCoreStimulusRoute,
+  runVeriCoreStimulusRun,
+  type VeriCoreRoutePreference,
+} from "../vericore/impetus.js";
 import { withTelegramApiErrorLogging } from "./api-logging.js";
 import {
   isSenderAllowed,
@@ -154,6 +159,7 @@ export const registerTelegramHandlers = ({
     debounceLane: TelegramDebounceLane;
     botUsername?: string;
   };
+
   const resolveTelegramDebounceLane = (msg: Message): TelegramDebounceLane => {
     const forwardMeta = msg as {
       forward_origin?: unknown;
@@ -194,6 +200,271 @@ export const registerTelegramHandlers = ({
         : async () => ({});
     return { message, me: ctx.me, getFile };
   };
+
+  type VeriCoreMode = "off" | "gate" | "driver";
+  const resolveVeriCoreMode = (): VeriCoreMode => {
+    const raw = (process.env.VERICORE_MODE ?? "off").trim().toLowerCase();
+    if (raw === "gate" || raw === "driver") {
+      return raw;
+    }
+    return "off";
+  };
+  const vericoreMode = resolveVeriCoreMode();
+  const vericoreLogEnabled = (() => {
+    const raw = (process.env.VERICORE_LOG ?? "").trim().toLowerCase();
+    return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
+  })();
+
+  const resolveVeriCoreChannelForMessage = (msg: Message): string => {
+    const isPrivate = msg.chat.type === "private";
+    if (isPrivate) {
+      return "telegram_dm";
+    }
+
+    const isGroupish =
+      msg.chat.type === "group" || msg.chat.type === "supergroup" || msg.chat.type === "channel";
+    if (!isGroupish) {
+      return "telegram_public";
+    }
+
+    const messageThreadId = (msg as { message_thread_id?: number }).message_thread_id;
+    const isForum = (msg.chat as { is_forum?: boolean }).is_forum === true;
+    const resolvedThreadId = resolveTelegramForumThreadId({
+      isForum,
+      messageThreadId,
+    });
+    const peerId = buildTelegramGroupPeerId(msg.chat.id, resolvedThreadId);
+    const parentPeer = buildTelegramParentPeer({
+      isGroup: true,
+      resolvedThreadId,
+      chatId: msg.chat.id,
+    });
+    const route = resolveAgentRoute({
+      cfg,
+      channel: "telegram",
+      accountId,
+      peer: {
+        kind: "group",
+        id: peerId,
+      },
+      parentPeer,
+    });
+    return route.agentId.toLowerCase().includes("family") ? "telegram_family" : "telegram_public";
+  };
+
+  const resolveVeriCoreRoutePreference = (): VeriCoreRoutePreference => {
+    if (vericoreMode === "driver") {
+      return "driver";
+    }
+    if (vericoreMode === "gate") {
+      return "gate";
+    }
+    return "off";
+  };
+
+  const resolveVeriCoreSessionKeyForMessage = (msg: Message): string => {
+    const isGroup =
+      msg.chat.type === "group" || msg.chat.type === "supergroup" || msg.chat.type === "channel";
+    const messageThreadId = (msg as { message_thread_id?: number }).message_thread_id;
+    const isForum = (msg.chat as { is_forum?: boolean }).is_forum === true;
+    const resolvedThreadId = resolveTelegramForumThreadId({
+      isForum,
+      messageThreadId,
+    });
+
+    const peerId = isGroup
+      ? buildTelegramGroupPeerId(msg.chat.id, resolvedThreadId)
+      : String(msg.chat.id);
+    const parentPeer = buildTelegramParentPeer({
+      isGroup,
+      resolvedThreadId,
+      chatId: msg.chat.id,
+    });
+    const route = resolveAgentRoute({
+      cfg,
+      channel: "telegram",
+      accountId,
+      peer: {
+        kind: isGroup ? "group" : "direct",
+        id: peerId,
+      },
+      parentPeer,
+    });
+
+    const baseSessionKey = route.sessionKey;
+    const dmThreadId =
+      !isGroup && typeof messageThreadId === "number" ? String(messageThreadId) : undefined;
+    const threadKeys =
+      dmThreadId != null
+        ? resolveThreadSessionKeys({ baseSessionKey, threadId: dmThreadId })
+        : null;
+    return threadKeys?.sessionKey ?? baseSessionKey;
+  };
+
+  const buildVeriCoreStimulusForMessage = (msg: Message) => ({
+    channel: resolveVeriCoreChannelForMessage(msg),
+    actor: msg.from?.id ? String(msg.from.id) : (msg.from?.username ?? "unknown"),
+    content: msg.text ?? msg.caption ?? "",
+    timestamp: typeof msg.date === "number" ? msg.date : Math.floor(Date.now() / 1000),
+    session_key: resolveVeriCoreSessionKeyForMessage(msg),
+    route_preference: resolveVeriCoreRoutePreference(),
+  });
+
+  const sendVeriCoreDriverResponse = async (msg: Message, responseText: string): Promise<void> => {
+    const messageThreadId = (msg as { message_thread_id?: number }).message_thread_id;
+    await withTelegramApiErrorLogging({
+      operation: "sendMessage",
+      runtime,
+      fn: () =>
+        bot.api.sendMessage(
+          msg.chat.id,
+          responseText,
+          typeof messageThreadId === "number" ? { message_thread_id: messageThreadId } : undefined,
+        ),
+    });
+  };
+
+  const handleIngressWithVeriCore = async (params: {
+    msg: Message;
+    onFallback: () => Promise<void>;
+  }): Promise<void> => {
+    if (vericoreMode === "off") {
+      await params.onFallback();
+      return;
+    }
+
+    const stimulusInput = buildVeriCoreStimulusForMessage(params.msg);
+
+    let route;
+    try {
+      route = await runVeriCoreStimulusRoute(stimulusInput);
+    } catch (err) {
+      runtime.error?.(warn(`vericore route error (failing open): ${String(err)}`));
+      await params.onFallback();
+      return;
+    }
+
+    logVerbose(
+      `[vericore] route channel=${route.channel} context=${route.context} route=${route.route} allow=${route.allow}`,
+    );
+
+    if (vericoreLogEnabled) {
+      logger.info(
+        {
+          mode: vericoreMode,
+          allow: route.allow,
+          route: route.route,
+          channel: route.channel,
+          context: route.context,
+          reason: route.reason ?? null,
+          command: route.command ?? null,
+          isControl: route.is_control,
+          sessionKey: route.session_key,
+          chatId: params.msg.chat.id,
+          messageId: params.msg.message_id,
+        },
+        "vericore ingress route",
+      );
+    }
+
+    if (!route.allow) {
+      logVerbose(`[vericore] route denied: ${route.reason ?? "unspecified"}`);
+      return;
+    }
+
+    if (route.route === "control" || route.route === "fallback" || vericoreMode !== "driver") {
+      await params.onFallback();
+      return;
+    }
+
+    try {
+      const result = await runVeriCoreStimulusRun({
+        ...stimulusInput,
+        session_key: route.session_key,
+        route_preference: "driver",
+      });
+      const decision = result.decision;
+
+      if (!decision.allow) {
+        logVerbose(`[vericore] driver denied: ${decision.reason ?? "unspecified"}`);
+        if (vericoreLogEnabled) {
+          logger.info(
+            {
+              mode: "driver",
+              allow: false,
+              channel: decision.channel,
+              context: decision.context,
+              reason: decision.reason ?? null,
+              chatId: params.msg.chat.id,
+              messageId: params.msg.message_id,
+              sessionKey: route.session_key,
+            },
+            "vericore driver denied message",
+          );
+        }
+        return;
+      }
+
+      const responseText = result.outcome?.response?.trim();
+      if (!responseText) {
+        logVerbose("[vericore] driver produced empty response; dropping message.");
+        if (vericoreLogEnabled) {
+          logger.warn(
+            {
+              mode: "driver",
+              channel: decision.channel,
+              context: decision.context,
+              toolsUsed: result.outcome?.tools_used ?? [],
+              promptTokens: result.outcome?.prompt_tokens ?? null,
+              completionTokens: result.outcome?.completion_tokens ?? null,
+              chatId: params.msg.chat.id,
+              messageId: params.msg.message_id,
+              sessionKey: route.session_key,
+            },
+            "vericore driver produced empty response",
+          );
+        }
+        return;
+      }
+
+      if (vericoreLogEnabled) {
+        logger.info(
+          {
+            mode: "driver",
+            allow: true,
+            channel: decision.channel,
+            context: decision.context,
+            toolsUsed: result.outcome?.tools_used ?? [],
+            promptTokens: result.outcome?.prompt_tokens ?? null,
+            completionTokens: result.outcome?.completion_tokens ?? null,
+            responseChars: responseText.length,
+            chatId: params.msg.chat.id,
+            messageId: params.msg.message_id,
+            sessionKey: route.session_key,
+          },
+          "vericore driver response ready",
+        );
+      }
+
+      await sendVeriCoreDriverResponse(params.msg, responseText);
+    } catch (err) {
+      if (vericoreLogEnabled) {
+        logger.warn(
+          {
+            mode: "driver",
+            chatId: params.msg.chat.id,
+            messageId: params.msg.message_id,
+            error: String(err),
+          },
+          "vericore driver error; falling back to OpenClaw",
+        );
+      }
+      runtime.error?.(warn(`vericore driver error (falling back to OpenClaw): ${String(err)}`));
+      await params.onFallback();
+    }
+  };
+
+
   const inboundDebouncer = createInboundDebouncer<TelegramDebounceEntry>({
     debounceMs,
     resolveDebounceMs: (entry) =>
@@ -216,8 +487,15 @@ export const registerTelegramHandlers = ({
         return;
       }
       if (entries.length === 1) {
+
         const replyMedia = await resolveReplyMediaForMessage(last.ctx, last.msg);
-        await processMessage(last.ctx, last.allMedia, last.storeAllowFrom, undefined, replyMedia);
+        await handleIngressWithVeriCore({
+          msg: last.msg,
+          onFallback: async () => {
+            await processMessage(last.ctx, last.allMedia, last.storeAllowFrom, undefined, replyMedia);
+          },
+        });
+
         return;
       }
       const combinedText = entries
@@ -236,15 +514,22 @@ export const registerTelegramHandlers = ({
         date: last.msg.date ?? first.msg.date,
       });
       const messageIdOverride = last.msg.message_id ? String(last.msg.message_id) : undefined;
+
       const syntheticCtx = buildSyntheticContext(baseCtx, syntheticMessage);
       const replyMedia = await resolveReplyMediaForMessage(baseCtx, syntheticMessage);
-      await processMessage(
-        syntheticCtx,
-        combinedMedia,
-        first.storeAllowFrom,
-        messageIdOverride ? { messageIdOverride } : undefined,
-        replyMedia,
-      );
+      await handleIngressWithVeriCore({
+        msg: syntheticMessage,
+        onFallback: async () => {
+          await processMessage(
+            syntheticCtx,
+            combinedMedia,
+            first.storeAllowFrom,
+            messageIdOverride ? { messageIdOverride } : undefined,
+            replyMedia,
+          );
+        },
+      });
+
     },
     onError: (err) => {
       runtime.error?.(danger(`telegram debounce flush failed: ${String(err)}`));
@@ -357,9 +642,16 @@ export const registerTelegramHandlers = ({
         }
       }
 
+
       const storeAllowFrom = await loadStoreAllowFrom();
       const replyMedia = await resolveReplyMediaForMessage(primaryEntry.ctx, primaryEntry.msg);
-      await processMessage(primaryEntry.ctx, allMedia, storeAllowFrom, undefined, replyMedia);
+      await handleIngressWithVeriCore({
+        msg: primaryEntry.msg,
+        onFallback: async () => {
+          await processMessage(primaryEntry.ctx, allMedia, storeAllowFrom, undefined, replyMedia);
+        },
+      });
+
     } catch (err) {
       runtime.error?.(danger(`media group handler failed: ${String(err)}`));
     }
@@ -389,8 +681,16 @@ export const registerTelegramHandlers = ({
       const storeAllowFrom = await loadStoreAllowFrom();
       const baseCtx = first.ctx;
 
-      await processMessage(buildSyntheticContext(baseCtx, syntheticMessage), [], storeAllowFrom, {
-        messageIdOverride: String(last.msg.message_id),
+
+      const syntheticCtx = buildSyntheticContext(baseCtx, syntheticMessage);
+      await handleIngressWithVeriCore({
+        msg: syntheticMessage,
+        onFallback: async () => {
+          await processMessage(syntheticCtx, [], storeAllowFrom, {
+            messageIdOverride: String(last.msg.message_id),
+          });
+        },
+
       });
     } catch (err) {
       runtime.error?.(danger(`text fragment handler failed: ${String(err)}`));
@@ -1223,10 +1523,17 @@ export const registerTelegramHandlers = ({
             base: callbackMessage,
             from: callback.from,
             text: `/model ${provider}/${model}`,
+
           });
-          await processMessage(buildSyntheticContext(ctx, syntheticMessage), [], storeAllowFrom, {
-            forceWasMentioned: true,
-            messageIdOverride: callback.id,
+          await handleIngressWithVeriCore({
+            msg: syntheticMessage,
+            onFallback: async () => {
+              await processMessage(buildSyntheticContext(ctx, syntheticMessage), [], storeAllowFrom, {
+                forceWasMentioned: true,
+                messageIdOverride: callback.id,
+              });
+            },
+
           });
           return;
         }
@@ -1238,10 +1545,17 @@ export const registerTelegramHandlers = ({
         base: callbackMessage,
         from: callback.from,
         text: data,
+
       });
-      await processMessage(buildSyntheticContext(ctx, syntheticMessage), [], storeAllowFrom, {
-        forceWasMentioned: true,
-        messageIdOverride: callback.id,
+      await handleIngressWithVeriCore({
+        msg: syntheticMessage,
+        onFallback: async () => {
+          await processMessage(buildSyntheticContext(ctx, syntheticMessage), [], storeAllowFrom, {
+            forceWasMentioned: true,
+            messageIdOverride: callback.id,
+          });
+        },
+
       });
     } catch (err) {
       runtime.error?.(danger(`callback handler failed: ${String(err)}`));
