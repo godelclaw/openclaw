@@ -7,7 +7,7 @@ private = "/home/zarclaw/private"
 family = "/home/zarclaw/family"
 private_prefixes = ["/home/zarclaw/shared"]
 family_prefixes = []
-public_prefixes = ["/home/zarclaw/public", "/home/zarclaw/repos"]
+public_prefixes = ["/home/zarclaw/public", "/home/zarclaw/repos", "/home/zarclaw/governance-reasoning-engine", "/home/zarclaw/mettaclaw"]
 dot_paths_private = true
 default_private = true
 
