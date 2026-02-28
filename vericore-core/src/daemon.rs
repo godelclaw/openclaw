@@ -333,10 +333,19 @@ fn trim_history(mut history: Vec<ChatMessage>, limit: usize) -> Vec<ChatMessage>
     if limit == 0 {
         return Vec::new();
     }
-    if history.len() > limit {
-        let drop_count = history.len().saturating_sub(limit);
-        history.drain(0..drop_count);
+    if history.len() <= limit {
+        return history;
     }
+
+    let mut start = history.len().saturating_sub(limit);
+
+    // Never start inside a tool-result block; providers require each tool_result
+    // to follow the matching assistant tool_use in the immediately previous message.
+    while start < history.len() && history[start].role == "tool" {
+        start += 1;
+    }
+
+    history.drain(0..start);
     history
 }
 
@@ -511,4 +520,49 @@ fn truncate_chars(text: &str, max_chars: usize) -> String {
         out.push_str("...");
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::trim_history;
+    use crate::llm::{ChatMessage, ToolCall};
+    use serde_json::json;
+
+    #[test]
+    fn trim_history_never_starts_with_tool_result() {
+        let history = vec![
+            ChatMessage::user("u1"),
+            ChatMessage::assistant_with_tools(
+                Some("calling"),
+                &[ToolCall {
+                    id: "call_1".into(),
+                    name: "read_file".into(),
+                    arguments: json!({"path": "/tmp/x"}),
+                }],
+            ),
+            ChatMessage::tool_result("call_1", "read_file", "ok"),
+            ChatMessage::assistant("done"),
+        ];
+
+        let trimmed = trim_history(history, 2);
+        assert_eq!(trimmed.len(), 1);
+        assert_ne!(trimmed[0].role, "tool");
+        assert_eq!(trimmed[0].role, "assistant");
+    }
+
+    #[test]
+    fn trim_history_keeps_valid_suffix() {
+        let history = vec![
+            ChatMessage::user("u1"),
+            ChatMessage::assistant("a1"),
+            ChatMessage::user("u2"),
+            ChatMessage::assistant("a2"),
+        ];
+
+        let trimmed = trim_history(history, 3);
+        assert_eq!(trimmed.len(), 3);
+        assert_eq!(trimmed[0].role, "assistant");
+        assert_eq!(trimmed[1].role, "user");
+        assert_eq!(trimmed[2].role, "assistant");
+    }
 }
