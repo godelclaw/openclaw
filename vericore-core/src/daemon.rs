@@ -1,11 +1,13 @@
 use std::collections::{HashMap, HashSet};
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use adclaw_memory::{MemoryCortex, MemoryTier, TurnEvent};
+use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -26,6 +28,8 @@ const MEMORY_QUERY_LIMIT: usize = 6;
 const MEMORY_HOT_LIMIT: usize = 4;
 const MEMORY_HOT_MIN_REINFORCEMENT: u32 = 2;
 const MEMORY_MAX_SUMMARY_CHARS: usize = 220;
+const HISTORY_MAX_USER_CHARS: usize = 800;
+const HISTORY_MAX_ASSISTANT_CHARS: usize = 1200;
 
 #[derive(Debug, Deserialize)]
 pub struct DaemonRequest {
@@ -74,6 +78,7 @@ struct SharedState {
     sessions: Mutex<HashMap<String, Vec<ChatMessage>>>,
     memory_path: PathBuf,
     memory: Mutex<MemoryCortex>,
+    history_root: PathBuf,
 }
 
 pub fn serve(config_path: &Path, socket_path: &Path) -> Result<(), String> {
@@ -91,6 +96,9 @@ pub fn serve(config_path: &Path, socket_path: &Path) -> Result<(), String> {
         })?;
     }
     let memory = load_memory_cortex(&memory_path);
+
+    let history_root = resolve_history_root(&config, config_path);
+    ensure_history_dirs(&history_root)?;
 
     if let Some(parent) = socket_path.parent() {
         fs::create_dir_all(parent).map_err(|e| {
@@ -126,6 +134,7 @@ pub fn serve(config_path: &Path, socket_path: &Path) -> Result<(), String> {
             socket_path.display()
         );
         eprintln!("[vericore] memory cortex file {}", memory_path.display());
+        eprintln!("[vericore] history root {}", history_root.display());
 
         let shared = Arc::new(SharedState {
             config,
@@ -134,6 +143,7 @@ pub fn serve(config_path: &Path, socket_path: &Path) -> Result<(), String> {
             sessions: Mutex::new(HashMap::new()),
             memory_path,
             memory: Mutex::new(memory),
+            history_root,
         });
 
         loop {
@@ -172,6 +182,35 @@ async fn handle_client(mut stream: UnixStream, shared: Arc<SharedState>) -> Resu
 async fn dispatch_request(request: DaemonRequest, shared: &SharedState) -> DaemonResponse {
     match request.method.as_str() {
         "health" => DaemonResponse::ok(request.id, json!({"status":"ok"})),
+        "memory_status" => {
+            let stats = {
+                let memory = shared.memory.lock().await;
+                memory.stats()
+            };
+
+            let history_daily = count_markdown_files(&shared.history_root.join("daily"));
+            let history_weekly = count_markdown_files(&shared.history_root.join("weekly"));
+            let history_daily_merged =
+                count_markdown_files(&shared.history_root.join("daily-merged"));
+
+            DaemonResponse::ok(
+                request.id,
+                json!({
+                    "memory": {
+                        "file": shared.memory_path.display().to_string(),
+                        "total_items": stats.total_items,
+                        "by_tier": stats.by_tier,
+                        "by_type": stats.by_type,
+                    },
+                    "history": {
+                        "root": shared.history_root.display().to_string(),
+                        "daily_files": history_daily,
+                        "weekly_files": history_weekly,
+                        "daily_merged_files": history_daily_merged,
+                    }
+                }),
+            )
+        }
         "decide" => match request.stimulus {
             Some(input) => {
                 let decision = decide_stimulus(&shared.policy, &input);
@@ -278,19 +317,26 @@ async fn dispatch_request(request: DaemonRequest, shared: &SharedState) -> Daemo
                         }
 
                         let response_text = outcome.response.clone();
+                        let turn_event = TurnEvent {
+                            session_key: route.session_key.clone(),
+                            timestamp: stimulus.timestamp as i64,
+                            user_text: input.content.clone(),
+                            assistant_text: response_text,
+                            tier: memory_tier,
+                        };
+
                         let (created_memory_items, memory_total_after, memory_save_error) = {
                             let mut memory = shared.memory.lock().await;
-                            let created = memory.ingest_turn(TurnEvent {
-                                session_key: route.session_key.clone(),
-                                timestamp: stimulus.timestamp as i64,
-                                user_text: input.content.clone(),
-                                assistant_text: response_text,
-                                tier: memory_tier,
-                            });
+                            let created = memory.ingest_turn(turn_event.clone());
                             let save_error = memory.save_json(&shared.memory_path).err();
                             let total = memory.stats().total_items;
                             (created.len(), total, save_error)
                         };
+
+                        let history_write =
+                            append_and_compact_history(&shared.history_root, &turn_event)
+                                .map_err(|err| err.to_string())
+                                .ok();
 
                         match serde_json::to_value(outcome) {
                             Ok(value) => {
@@ -310,6 +356,13 @@ async fn dispatch_request(request: DaemonRequest, shared: &SharedState) -> Daemo
 
                                 if let Some(err) = memory_save_error {
                                     result["memory"]["save_error"] = json!(err);
+                                }
+
+                                if let Some(history) = history_write {
+                                    result["history"] = json!({
+                                        "daily_file": history.daily_file,
+                                        "rolled_up_files": history.rolled_up_files,
+                                    });
                                 }
 
                                 DaemonResponse::ok(request.id, result)
@@ -403,6 +456,183 @@ fn is_peer_disconnect(err: &std::io::Error) -> bool {
         err.kind(),
         std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
     )
+}
+
+#[derive(Debug, Clone)]
+struct HistoryWriteResult {
+    daily_file: String,
+    rolled_up_files: usize,
+}
+
+fn resolve_history_root(config: &Config, config_path: &Path) -> PathBuf {
+    if let Ok(raw) = std::env::var("VERICORE_HISTORY_DIR") {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed);
+        }
+    }
+
+    if config.paths.home_root.is_absolute() {
+        return config.paths.home_root.join("memory").join("history");
+    }
+
+    config_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("history")
+}
+
+fn ensure_history_dirs(root: &Path) -> Result<(), String> {
+    fs::create_dir_all(root.join("daily"))
+        .map_err(|e| format!("failed to create history daily dir {}: {e}", root.display()))?;
+    fs::create_dir_all(root.join("weekly")).map_err(|e| {
+        format!(
+            "failed to create history weekly dir {}: {e}",
+            root.display()
+        )
+    })?;
+    fs::create_dir_all(root.join("daily-merged")).map_err(|e| {
+        format!(
+            "failed to create history daily-merged dir {}: {e}",
+            root.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn append_and_compact_history(
+    root: &Path,
+    event: &TurnEvent,
+) -> Result<HistoryWriteResult, String> {
+    ensure_history_dirs(root)?;
+
+    let dt = ts_to_utc(event.timestamp);
+    let day = dt.format("%Y-%m-%d").to_string();
+    let iso_ts = dt.to_rfc3339();
+    let daily_path = root.join("daily").join(format!("{day}.md"));
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&daily_path)
+        .map_err(|e| format!("open daily history {}: {e}", daily_path.display()))?;
+
+    if file
+        .metadata()
+        .map_err(|e| format!("stat daily history {}: {e}", daily_path.display()))?
+        .len()
+        == 0
+    {
+        writeln!(file, "# History {day}\n")
+            .map_err(|e| format!("write daily history header {}: {e}", daily_path.display()))?;
+    }
+
+    writeln!(
+        file,
+        "## {iso_ts} | session={}\n- user: {}\n- assistant: {}\n",
+        event.session_key,
+        truncate_chars(event.user_text.trim(), HISTORY_MAX_USER_CHARS),
+        truncate_chars(event.assistant_text.trim(), HISTORY_MAX_ASSISTANT_CHARS),
+    )
+    .map_err(|e| format!("append daily history {}: {e}", daily_path.display()))?;
+
+    let rolled_up_files = compact_daily_history_into_weekly(root, dt.date_naive())?;
+
+    Ok(HistoryWriteResult {
+        daily_file: daily_path.display().to_string(),
+        rolled_up_files,
+    })
+}
+
+fn compact_daily_history_into_weekly(root: &Path, now: NaiveDate) -> Result<usize, String> {
+    let daily_dir = root.join("daily");
+    let weekly_dir = root.join("weekly");
+    let merged_dir = root.join("daily-merged");
+
+    let now_week = now.iso_week();
+    let mut moved = 0usize;
+
+    let entries = fs::read_dir(&daily_dir)
+        .map_err(|e| format!("read history daily dir {}: {e}", daily_dir.display()))?;
+
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("iterate history daily dir: {e}"))?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !name.ends_with(".md") {
+            continue;
+        }
+
+        let day_str = name.trim_end_matches(".md");
+        let Ok(day) = NaiveDate::parse_from_str(day_str, "%Y-%m-%d") else {
+            continue;
+        };
+
+        let week = day.iso_week();
+        if week.year() == now_week.year() && week.week() == now_week.week() {
+            continue;
+        }
+
+        let week_key = format!("{}-W{:02}", week.year(), week.week());
+        let weekly_path = weekly_dir.join(format!("{week_key}.md"));
+        let content = fs::read_to_string(&path)
+            .map_err(|e| format!("read daily history {}: {e}", path.display()))?;
+
+        let mut weekly = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&weekly_path)
+            .map_err(|e| format!("open weekly history {}: {e}", weekly_path.display()))?;
+
+        if weekly
+            .metadata()
+            .map_err(|e| format!("stat weekly history {}: {e}", weekly_path.display()))?
+            .len()
+            == 0
+        {
+            writeln!(weekly, "# Weekly History {week_key}\n").map_err(|e| {
+                format!("write weekly history header {}: {e}", weekly_path.display())
+            })?;
+        }
+
+        writeln!(
+            weekly,
+            "\n---\n<!-- merged-from: {day_str} -->\n## Day {day_str}\n\n{content}"
+        )
+        .map_err(|e| format!("append weekly history {}: {e}", weekly_path.display()))?;
+
+        let merged_target = merged_dir.join(name);
+        fs::rename(&path, &merged_target).map_err(|e| {
+            format!(
+                "move merged daily history {} -> {}: {e}",
+                path.display(),
+                merged_target.display()
+            )
+        })?;
+        moved = moved.saturating_add(1);
+    }
+
+    Ok(moved)
+}
+
+fn ts_to_utc(ts: i64) -> DateTime<Utc> {
+    DateTime::from_timestamp(ts, 0).unwrap_or_else(Utc::now)
+}
+
+fn count_markdown_files(dir: &Path) -> usize {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| entry.file_name().to_str().map(str::to_string))
+        .filter(|name| name.ends_with(".md"))
+        .count()
 }
 
 fn resolve_memory_path(config_path: &Path) -> PathBuf {

@@ -26,8 +26,10 @@ import { readChannelAllowFromStore } from "../pairing/pairing-store.js";
 import { resolveAgentRoute } from "../routing/resolve-route.js";
 import { resolveThreadSessionKeys } from "../routing/session-key.js";
 import {
+  runVeriCoreMemoryStatus,
   runVeriCoreStimulusRoute,
   runVeriCoreStimulusRun,
+  type VeriCoreMemoryStatus,
   type VeriCoreRoutePreference,
 } from "../vericore/impetus.js";
 import { withTelegramApiErrorLogging } from "./api-logging.js";
@@ -76,6 +78,37 @@ function isMediaSizeLimitError(err: unknown): boolean {
 
 function isRecoverableMediaGroupError(err: unknown): boolean {
   return err instanceof MediaFetchError || isMediaSizeLimitError(err);
+}
+
+function isMemoryStatusCommand(command?: string | null): boolean {
+  if (!command) {
+    return false;
+  }
+  const normalized = command.trim().toLowerCase();
+  return (
+    normalized === "memory-status" ||
+    normalized === "memory_status" ||
+    normalized === "memorystatus"
+  );
+}
+
+function formatMemoryStatusMessage(status: VeriCoreMemoryStatus): string {
+  const byTier = Object.entries(status.memory.by_tier)
+    .map(([tier, count]) => `${tier}: ${count}`)
+    .join(", ");
+  const byType = Object.entries(status.memory.by_type)
+    .map(([kind, count]) => `${kind}: ${count}`)
+    .join(", ");
+
+  return [
+    "VeriCore memory status:",
+    `- items: ${status.memory.total_items}`,
+    `- by tier: ${byTier || "(none)"}`,
+    `- by type: ${byType || "(none)"}`,
+    `- memory file: ${status.memory.file}`,
+    `- history root: ${status.history.root}`,
+    `- history daily/week/merged: ${status.history.daily_files}/${status.history.weekly_files}/${status.history.daily_merged_files}`,
+  ].join("\n");
 }
 
 function hasInboundMedia(msg: Message): boolean {
@@ -372,7 +405,24 @@ export const registerTelegramHandlers = ({
       return;
     }
 
-    if (route.route === "control" || route.route === "fallback" || vericoreMode !== "driver") {
+    if (route.route === "control") {
+      if (isMemoryStatusCommand(route.command)) {
+        try {
+          const status = await runVeriCoreMemoryStatus();
+          await sendVeriCoreDriverResponse(params.msg, formatMemoryStatusMessage(status));
+          return;
+        } catch (err) {
+          runtime.error?.(warn(`vericore memory_status error (falling back): ${String(err)}`));
+          await params.onFallback();
+          return;
+        }
+      }
+
+      await params.onFallback();
+      return;
+    }
+
+    if (route.route === "fallback" || vericoreMode !== "driver") {
       await params.onFallback();
       return;
     }

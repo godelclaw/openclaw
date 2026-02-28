@@ -50,6 +50,21 @@ export type VeriCoreRunResult = {
   outcome?: VeriCoreTurnOutcome;
 };
 
+export type VeriCoreMemoryStatus = {
+  memory: {
+    file: string;
+    total_items: number;
+    by_tier: Record<string, number>;
+    by_type: Record<string, number>;
+  };
+  history: {
+    root: string;
+    daily_files: number;
+    weekly_files: number;
+    daily_merged_files: number;
+  };
+};
+
 type VeriCoreSocketResponse<T> = {
   ok: boolean;
   id?: string;
@@ -187,7 +202,7 @@ export function buildVeriCoreStimulusInput(ctx: FinalizedMsgContext): VeriCoreSt
 }
 
 async function runVeriCoreSocketMethod<T>(
-  method: "health" | "decide" | "route" | "run",
+  method: "health" | "decide" | "route" | "run" | "memory_status",
   stimulus: VeriCoreStimulusInput | undefined,
   options: VeriCoreBridgeOptions,
 ): Promise<T> {
@@ -483,6 +498,21 @@ export async function runVeriCoreStimulusRun(
   }
 
   return await runVeriCoreStimulusRunViaProcess(stimulus, runOptions);
+}
+
+export async function runVeriCoreMemoryStatus(
+  options: VeriCoreBridgeOptions = {},
+): Promise<VeriCoreMemoryStatus> {
+  const statusOptions = {
+    ...options,
+    timeoutMs: options.timeoutMs ?? DEFAULT_DECIDE_TIMEOUT_MS,
+  };
+
+  return await runVeriCoreSocketMethod<VeriCoreMemoryStatus>(
+    "memory_status",
+    undefined,
+    statusOptions,
+  );
 }
 
 export async function runVeriCoreDecisionForContext(

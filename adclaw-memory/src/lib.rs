@@ -225,7 +225,7 @@ impl MemoryCortex {
         let lower = event.user_text.to_lowercase();
 
         if lower.contains("remember") {
-            created.push(self.remember_at(
+            let (id, was_created) = self.remember_or_reinforce_at(
                 CreateMemoryInput {
                     tier: event.tier,
                     memory_type: MemoryType::ExplicitRemember,
@@ -234,11 +234,14 @@ impl MemoryCortex {
                     source_session: Some(event.session_key.clone()),
                 },
                 event.timestamp,
-            ));
+            );
+            if was_created {
+                created.push(id);
+            }
         }
 
         if let Some(pref) = extract_after_prefix(&event.user_text, "I prefer") {
-            created.push(self.remember_at(
+            let (id, was_created) = self.remember_or_reinforce_at(
                 CreateMemoryInput {
                     tier: event.tier,
                     memory_type: MemoryType::Preference,
@@ -247,11 +250,14 @@ impl MemoryCortex {
                     source_session: Some(event.session_key.clone()),
                 },
                 event.timestamp,
-            ));
+            );
+            if was_created {
+                created.push(id);
+            }
         }
 
         if let Some(name) = extract_after_prefix(&event.user_text, "My name is") {
-            created.push(self.remember_at(
+            let (id, was_created) = self.remember_or_reinforce_at(
                 CreateMemoryInput {
                     tier: event.tier,
                     memory_type: MemoryType::Fact,
@@ -260,7 +266,10 @@ impl MemoryCortex {
                     source_session: Some(event.session_key),
                 },
                 event.timestamp,
-            ));
+            );
+            if was_created {
+                created.push(id);
+            }
         }
 
         created
@@ -303,6 +312,48 @@ impl MemoryCortex {
                 .or_default()
                 .push(id);
         }
+    }
+
+    fn remember_or_reinforce_at(&mut self, input: CreateMemoryInput, ts: i64) -> (MemoryId, bool) {
+        if let Some(existing_id) = self.find_duplicate_candidate(&input) {
+            if let Some(existing) = self.items.get_mut(&existing_id) {
+                existing.reinforcement_count = existing.reinforcement_count.saturating_add(1);
+                existing.updated_at = ts;
+                // Keep categories rich over time while preserving deterministic normalization.
+                let mut merged = existing.categories.clone();
+                merged.extend(input.categories.iter().cloned());
+                existing.categories = normalize_categories(merged);
+            }
+            self.rebuild_indexes();
+            return (existing_id, false);
+        }
+
+        (self.remember_at(input, ts), true)
+    }
+
+    fn find_duplicate_candidate(&self, input: &CreateMemoryInput) -> Option<MemoryId> {
+        let input_norm = normalize_summary_for_dedupe(&input.summary);
+        if input_norm.is_empty() {
+            return None;
+        }
+        let input_tokens = tokenize(&input.summary);
+
+        self.items
+            .values()
+            .filter(|item| item.tier == input.tier)
+            .filter(|item| item.memory_type == input.memory_type)
+            .filter_map(|item| {
+                let existing_norm = normalize_summary_for_dedupe(&item.summary);
+                if existing_norm == input_norm {
+                    return Some((item.id, 1.0_f32, item.updated_at));
+                }
+
+                let existing_tokens = tokenize(&item.summary);
+                let overlap = jaccard_similarity(&input_tokens, &existing_tokens);
+                (overlap >= 0.92).then_some((item.id, overlap, item.updated_at))
+            })
+            .max_by(|a, b| cmp_f32_desc(a.1, b.1).then_with(|| a.2.cmp(&b.2)))
+            .map(|(id, _, _)| id)
     }
 }
 
@@ -349,7 +400,7 @@ fn score_item(item: &MemoryItem, query_tokens: &HashSet<String>) -> f32 {
         return 0.0;
     }
 
-    score + (item.reinforcement_count as f32 * 0.15)
+    score + (item.reinforcement_count as f32 * 0.25)
 }
 
 fn extract_after_prefix(text: &str, prefix: &str) -> Option<String> {
@@ -370,6 +421,25 @@ fn now_ts() -> i64 {
 
 fn cmp_f32_desc(a: f32, b: f32) -> Ordering {
     a.partial_cmp(&b).unwrap_or(Ordering::Equal)
+}
+
+fn normalize_summary_for_dedupe(text: &str) -> String {
+    let mut tokens: Vec<_> = tokenize(text).into_iter().collect();
+    tokens.sort();
+    tokens.join(" ")
+}
+
+fn jaccard_similarity(a: &HashSet<String>, b: &HashSet<String>) -> f32 {
+    if a.is_empty() || b.is_empty() {
+        return 0.0;
+    }
+    let intersection = a.intersection(b).count() as f32;
+    let union = a.union(b).count() as f32;
+    if union <= 0.0 {
+        0.0
+    } else {
+        intersection / union
+    }
 }
 
 #[cfg(test)]
@@ -454,6 +524,28 @@ mod tests {
         assert!(ids.len() >= 2);
         let hits = cortex.search("concise", MemoryTier::Private, 10);
         assert!(!hits.is_empty());
+    }
+
+    #[test]
+    fn ingest_turn_dedupes_and_reinforces() {
+        let mut cortex = MemoryCortex::new();
+        let event = TurnEvent {
+            session_key: "telegram:181832275".to_string(),
+            timestamp: 400,
+            user_text: "Remember: prioritize reliability over low-quality fallbacks.".to_string(),
+            assistant_text: "Noted".to_string(),
+            tier: MemoryTier::Private,
+        };
+
+        let created_1 = cortex.ingest_turn(event.clone());
+        let created_2 = cortex.ingest_turn(event);
+
+        assert_eq!(created_1.len(), 1);
+        assert_eq!(created_2.len(), 0);
+
+        let id = created_1[0];
+        let item = cortex.get(id).expect("item should exist");
+        assert!(item.reinforcement_count >= 2);
     }
 
     #[test]
