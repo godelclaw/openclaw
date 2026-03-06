@@ -5,6 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::{Config, StringList, TimeWindow};
 use crate::types::{Action, Channel, ContextTier, IntegrityTier, Verdict};
+use vericore_policy::ingress::WriteTargetClass;
 
 /// Filesystem layout:
 ///
@@ -489,19 +490,16 @@ impl GatePolicy {
             return *tier;
         }
 
-        match channel {
-            Channel::TelegramPublic | Channel::Api | Channel::Moltbook => ContextTier::Public,
-            Channel::TelegramFamily => ContextTier::Family,
-            Channel::TelegramDm | Channel::Internal | Channel::Terminal => ContextTier::Private,
-        }
+        from_policy_context(
+            vericore_policy::channels::default_context_for_channel(to_policy_channel(channel))
+        )
     }
 
     pub fn integrity_for_channel(&self, channel: Channel) -> IntegrityTier {
-        match self.context_for_channel(channel) {
-            ContextTier::Public => IntegrityTier::Untrusted,
-            ContextTier::Family => IntegrityTier::Reviewed,
-            ContextTier::Private => IntegrityTier::Trusted,
-        }
+        let ctx = self.context_for_channel(channel);
+        from_policy_integrity(
+            vericore_policy::channels::integrity_for_context(to_policy_context(ctx))
+        )
     }
 
     /// Ingress integrity check for sensitive mutations.
@@ -536,7 +534,8 @@ impl GatePolicy {
 
         match primitive {
             Action::Exec { .. } => {
-                if integrity == IntegrityTier::Trusted {
+                let policy_integrity = to_policy_integrity(integrity);
+                if vericore_policy::ingress::ingress_allows_exec(policy_integrity) {
                     Verdict::allow()
                 } else {
                     Verdict::deny(format!(
@@ -546,33 +545,42 @@ impl GatePolicy {
                 }
             }
             Action::WriteFile { path, .. } => {
-                // Mindlock is quarantine: untrusted writes always allowed.
-                // Check raw path first — parent dir may not exist yet.
-                if self.is_raw_mindlock_write(path) {
-                    return Verdict::allow();
-                }
-
-                let canonical = match canonicalize_write_target(path) {
-                    Ok(p) => p,
-                    Err(err) => return Verdict::deny(err),
-                };
-
-                let target_tier = self.roots.tier_for_path(&canonical);
-                let is_private_write = matches!(target_tier, Some(ContextTier::Private));
-                let is_sensitive_config = is_sensitive_config_path(&canonical);
-
-                if (is_private_write || is_sensitive_config) && integrity != IntegrityTier::Trusted
-                {
+                // I/O: classify the write target
+                let target_class = self.classify_write_target(path);
+                let policy_integrity = to_policy_integrity(integrity);
+                if vericore_policy::ingress::ingress_allows_write(policy_integrity, target_class) {
+                    Verdict::allow()
+                } else {
                     Verdict::deny(format!(
                         "ingress integrity {:?} cannot perform sensitive write: {}",
                         integrity,
-                        canonical.display()
+                        path.display()
                     ))
-                } else {
-                    Verdict::allow()
                 }
             }
             _ => Verdict::allow(),
+        }
+    }
+
+    /// Classify a write target path into a WriteTargetClass for the verified kernel.
+    fn classify_write_target(&self, path: &Path) -> WriteTargetClass {
+        // Mindlock check on raw path (parent may not exist yet)
+        if self.is_raw_mindlock_write(path) {
+            return WriteTargetClass::Mindlock;
+        }
+        match canonicalize_write_target(path) {
+            Ok(canonical) => {
+                let is_private = matches!(self.roots.tier_for_path(&canonical), Some(ContextTier::Private));
+                let is_sensitive = is_sensitive_config_path(&canonical);
+                if is_private {
+                    WriteTargetClass::Private
+                } else if is_sensitive {
+                    WriteTargetClass::SensitiveConfig
+                } else {
+                    WriteTargetClass::Other
+                }
+            }
+            Err(_) => WriteTargetClass::Unresolved,
         }
     }
 
@@ -950,6 +958,55 @@ impl GatePolicy {
                 host == allowed || host.ends_with(&format!(".{allowed}"))
             })
         }
+    }
+}
+
+/// Convert vericore-core IntegrityTier to vericore-policy IntegrityTier.
+/// Convert vericore-core Channel to vericore-policy Channel.
+fn to_policy_channel(channel: Channel) -> vericore_policy::channels::Channel {
+    match channel {
+        Channel::TelegramPublic => vericore_policy::channels::Channel::TelegramPublic,
+        Channel::TelegramFamily => vericore_policy::channels::Channel::TelegramFamily,
+        Channel::TelegramDm => vericore_policy::channels::Channel::TelegramDm,
+        Channel::Terminal => vericore_policy::channels::Channel::Terminal,
+        Channel::Internal => vericore_policy::channels::Channel::Internal,
+        Channel::Api => vericore_policy::channels::Channel::Api,
+        Channel::Moltbook => vericore_policy::channels::Channel::Moltbook,
+    }
+}
+
+/// Convert vericore-policy ContextTier to vericore-core ContextTier.
+fn from_policy_context(ctx: vericore_policy::tiers::ContextTier) -> ContextTier {
+    match ctx {
+        vericore_policy::tiers::ContextTier::Public => ContextTier::Public,
+        vericore_policy::tiers::ContextTier::Family => ContextTier::Family,
+        vericore_policy::tiers::ContextTier::Private => ContextTier::Private,
+    }
+}
+
+/// Convert vericore-core ContextTier to vericore-policy ContextTier.
+fn to_policy_context(ctx: ContextTier) -> vericore_policy::tiers::ContextTier {
+    match ctx {
+        ContextTier::Public => vericore_policy::tiers::ContextTier::Public,
+        ContextTier::Family => vericore_policy::tiers::ContextTier::Family,
+        ContextTier::Private => vericore_policy::tiers::ContextTier::Private,
+    }
+}
+
+/// Convert vericore-policy IntegrityTier to vericore-core IntegrityTier.
+fn from_policy_integrity(i: vericore_policy::tiers::IntegrityTier) -> IntegrityTier {
+    match i {
+        vericore_policy::tiers::IntegrityTier::Untrusted => IntegrityTier::Untrusted,
+        vericore_policy::tiers::IntegrityTier::Reviewed => IntegrityTier::Reviewed,
+        vericore_policy::tiers::IntegrityTier::Trusted => IntegrityTier::Trusted,
+    }
+}
+
+fn to_policy_integrity(i: IntegrityTier) -> vericore_policy::tiers::IntegrityTier {
+    match i {
+        IntegrityTier::Untrusted => vericore_policy::tiers::IntegrityTier::Untrusted,
+        IntegrityTier::Reviewed => vericore_policy::tiers::IntegrityTier::Reviewed,
+        IntegrityTier::Trusted => vericore_policy::tiers::IntegrityTier::Trusted,
     }
 }
 

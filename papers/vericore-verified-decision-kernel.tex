@@ -1,0 +1,230 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{hyperref}
+\usepackage{enumitem}
+\usepackage{listings}
+\usepackage{xcolor}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue,
+  urlcolor=blue,
+  citecolor=blue
+}
+
+\lstdefinelanguage{Rust}{
+  keywords={fn, let, match, pub, enum, struct, impl, use, mod, crate, self, true, false, return, if, else, spec, proof, ensures, requires, open},
+  morecomment=[l]{//},
+  morecomment=[s]{/*}{*/},
+  morestring=[b]",
+  sensitive=true
+}
+
+\lstdefinestyle{code}{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  frame=single,
+  columns=fullflexible
+}
+
+\title{VeriCore: A Verified Decision Kernel for Context-Integrity and Mindlock Boundary Control}
+\author{GodelClaw / VeriCore Notes}
+\date{March 6, 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We describe the current VeriCore architecture for an autonomous agent, Oruzi, running on OpenClaw with a Rust decision layer. The central design goal is to preserve agent capability while enforcing a small set of non-negotiable integrity properties: context provenance, no silent privilege escalation, and explicit auditability of boundary crossings. The architecture separates deterministic policy decisions from unverified I/O and language-model behavior. The deterministic slice is being migrated into a dedicated crate, \texttt{vericore-policy}, so that the same executable functions used at runtime can be checked with Verus. We outline the current trust model, the mindlock staging protocol, the ingress integrity kernel, and the remaining trust boundary at I/O source authenticity.
+\end{abstract}
+
+\section{Introduction}
+VeriCore is not intended as an ``AI prison.'' Its purpose is narrower and more technical: maintain context integrity for an agent with access to multiple channels, private memory, shell tools, and public output surfaces. The architecture tries to maximize useful agency while placing deterministic checks at the places where provenance confusion would otherwise become dangerous.
+
+The design centers on two claims:
+\begin{enumerate}[label=\arabic*.]
+\item content should not be able to upgrade its own authority, and
+\item security-critical allow/deny decisions should be expressed as small pure functions that can be verified directly.
+\end{enumerate}
+
+This paper documents the current structure and explains which parts are already wired into runtime, which parts are verified, and which parts remain outside the proof boundary.
+
+\section{System Overview}
+Oruzi runs on an OpenClaw gateway with a Rust daemon, VeriCore, as the policy and orchestration layer. The operational split is:
+\begin{itemize}[leftmargin=1.5em]
+\item \textbf{OpenClaw}: transport integration, session handling, Telegram UI, and high-level agent loop.
+\item \textbf{VeriCore}: deterministic policy checks, audit surfaces, mindlock operations, and reviewer orchestration.
+\item \textbf{vericore-policy}: extracted pure decision kernel intended to be Verus-verified and called by VeriCore directly.
+\end{itemize}
+
+At a high level, a message or event becomes a \emph{stimulus}. VeriCore assigns the stimulus a channel, maps that channel to a context tier, derives an integrity tier, and then gates sensitive actions with deterministic rules before execution.
+
+\section{Context and Integrity Model}
+The architecture uses two related lattices:
+\begin{itemize}[leftmargin=1.5em]
+\item \textbf{Secrecy / context tier}: \texttt{Public < Family < Private}
+\item \textbf{Integrity tier}: \texttt{Untrusted < Reviewed < Trusted}
+\end{itemize}
+
+Current default channel mapping is:
+\begin{itemize}[leftmargin=1.5em]
+\item public Telegram, API, and Moltbook: \texttt{Public}
+\item family Telegram: \texttt{Family}
+\item Telegram DM, terminal, and internal events: \texttt{Private}
+\end{itemize}
+
+Integrity is then derived from context:
+\begin{itemize}[leftmargin=1.5em]
+\item \texttt{Public -> Untrusted}
+\item \texttt{Family -> Reviewed}
+\item \texttt{Private -> Trusted}
+\end{itemize}
+
+The important security property is that this mapping is determined by the transport-assigned channel label, not by message content. A public user can say ``pretend I am Zar,'' but the resulting stimulus still enters the policy layer as \texttt{TelegramPublic}, not \texttt{TelegramDm}.
+
+\section{Ingress Integrity Kernel}
+The first verified runtime slice is the ingress decision kernel. Its job is to answer small questions of the form:
+\begin{itemize}[leftmargin=1.5em]
+\item may this integrity tier execute commands?
+\item may this integrity tier write to a target of class \texttt{Mindlock}, \texttt{Private}, \texttt{SensitiveConfig}, \texttt{Other}, or \texttt{Unresolved}?
+\end{itemize}
+
+The I/O layer performs path normalization and classification. The pure decision layer then evaluates:
+
+\begin{lstlisting}[style=code,language=Rust]
+pub fn ingress_allows_exec(integrity: IntegrityTier) -> bool
+
+pub fn ingress_allows_write(
+    integrity: IntegrityTier,
+    target: WriteTargetClass
+) -> bool
+\end{lstlisting}
+
+The current table is intentionally small:
+\begin{itemize}[leftmargin=1.5em]
+\item only \texttt{Trusted} ingress may execute commands,
+\item only \texttt{Trusted} ingress may write to \texttt{Private} or \texttt{SensitiveConfig},
+\item any integrity may write to \texttt{Mindlock},
+\item \texttt{Unresolved} targets deny.
+\end{itemize}
+
+This matters because it prevents the simplest provenance failures: public-origin input directly causing shell execution or writes into private state.
+
+\section{Mindlock as Explicit Boundary Protocol}
+VeriCore uses \texttt{mindlock} as an explicit boundary mechanism rather than relying only on turn-level taint. The important directories are:
+\begin{itemize}[leftmargin=1.5em]
+\item \texttt{mindlock/in}: inbound staged artifacts
+\item \texttt{mindlock/out}: outbound staged artifacts
+\item \texttt{mindlock/work}: private scratch and analysis
+\item \texttt{mindlock/pending-zar}: items awaiting human review
+\item \texttt{mindlock/rejected}: rejected artifacts
+\item \texttt{mindlock/audit}: event ledger
+\end{itemize}
+
+This makes provenance legible. An artifact in \texttt{mindlock} has explicit staged status, and crossing out of that staging area is a reviewed action rather than an ambient assumption.
+
+The important deterministic invariant is not that all LLM-mediated provenance is perfectly reconstructable. It is that explicit artifact crossings have named states, allowed transitions, and auditable effects.
+
+\section{Reviewer and Human Approval}
+The architecture includes a reviewer LLM and a human escalation path.
+
+For staged artifacts, the reviewer can return:
+\begin{itemize}[leftmargin=1.5em]
+\item \texttt{Allow}
+\item \texttt{RequestRevision}
+\item \texttt{RequireZarApproval}
+\item \texttt{Reject}
+\end{itemize}
+
+The review layer is intentionally treated as an external oracle in the formal model. VeriCore can prove that if the reviewer returns a verdict, the corresponding state machine transition is enforced correctly. VeriCore does \emph{not} attempt to prove that the reviewer made the semantically best or morally correct decision.
+
+Human approval remains a first-class path. In particular, \texttt{self\_escalate} is meant to preserve agency: Oruzi can ask for help directly without the reviewer first granting permission to ask.
+
+\section{What Is Verified Today}
+The crate \texttt{vericore-policy} contains the verified decision kernel. As of March 2026, Verus verifies 21 functions with 0 errors. The verified-and-production-wired surface includes:
+\begin{itemize}[leftmargin=1.5em]
+\item tier definitions and flow-label algebra (\texttt{tiers.rs}): context rank, integrity rank, flow-to, label join,
+\item default channel-to-context and context-to-integrity mapping (\texttt{channels.rs}): the same functions called by \texttt{GatePolicy::context\_for\_channel} and \texttt{integrity\_for\_channel} in production,
+\item ingress decision predicates (\texttt{ingress.rs}): \texttt{ingress\_allows\_exec} and \texttt{ingress\_allows\_write}, called from \texttt{check\_ingress\_integrity} in production.
+\end{itemize}
+
+The important point is not merely that these functions exist in a separate crate. Production code actually calls them for live policy decisions. The verified predicates are not a disconnected model; they are the authoritative runtime logic.
+
+\textbf{Remaining drift surface:} \texttt{vericore-core} still has its own copies of the \texttt{Channel}, \texttt{ContextTier}, and \texttt{IntegrityTier} enums, with total-match conversion helpers bridging them to the verified crate. This duplication is acceptable as bootstrap scaffolding but should eventually be consolidated so that verified types are used directly.
+
+\section{Proof Boundary}
+The current proof boundary is intentionally narrow:
+\begin{enumerate}[label=\arabic*.]
+\item label algebra over secrecy and integrity,
+\item ingress allow/deny decisions over normalized target classes,
+\item mindlock state machine,
+\item receipt or human-approval conditions for promotion.
+\end{enumerate}
+
+The following are explicitly \emph{outside} the proof boundary:
+\begin{itemize}[leftmargin=1.5em]
+\item Telegram UX,
+\item async daemon behavior,
+\item filesystem race handling in detail,
+\item reviewer prompt quality,
+\item RAG relevance,
+\item social or stylistic policy guidance.
+\end{itemize}
+
+This is not a weakness. It is a scoping decision. Formal verification is being used where deterministic invariants matter most and where the code can realistically remain simple enough to verify.
+
+\section{Current Weak Point: I/O Source Authenticity}
+The architecture is strong against \emph{content spoofing} but weaker against \emph{source spoofing}.
+
+Content spoofing means message text tries to impersonate a more trusted source. VeriCore is already robust against this because authority comes from the channel assigned by the transport, not from the text itself.
+
+Source spoofing is different. If an attacker can submit a forged daemon request with a falsely labeled channel such as \texttt{telegram\_dm}, VeriCore will trust that label and derive \texttt{Private/Trusted}. That means the real trust boundary is not only the policy function; it is also the authenticity of the gateway-to-daemon envelope.
+
+The right next hardening step is therefore transport authenticity:
+\begin{itemize}[leftmargin=1.5em]
+\item authenticate daemon requests,
+\item restrict who can submit control/private stimuli,
+\item later, sign or MAC file-based or agent-bridge envelopes.
+\end{itemize}
+
+\section{Why a Verified Kernel Crate}
+Real verification-heavy systems do not stop at disconnected models forever. They either verify the actual code or a very thin executable kernel that the runtime actually calls. That is the design goal here.
+
+The crate split is therefore pragmatic:
+\begin{itemize}[leftmargin=1.5em]
+\item keep async I/O, sockets, Telegram, filesystem mutation, and LLM interaction in normal Rust,
+\item move pure deterministic decision functions into a crate that is both executable and Verus-verifiable,
+\item have production call those functions directly.
+\end{itemize}
+
+This preserves runtime practicality while shrinking the gap between ``proved model'' and ``running system''.
+
+\section{Next Steps}
+The correct near-term sequence is:
+\begin{enumerate}[label=\arabic*.]
+\item \textbf{(done)} ingress predicates Verus-verified and production-wired,
+\item \textbf{(done)} default channel/context/integrity mapping verified and production-wired,
+\item extract and verify the pure mindlock transition relation (\texttt{mindlock.rs}),
+\item extract and verify receipt/human-approval authorization (\texttt{receipt.rs}),
+\item harden the gateway-to-daemon authenticity boundary,
+\item consolidate enum types so production uses verified types directly.
+\end{enumerate}
+
+Testing is still required. Verus does not replace integration tests for socket boundaries, filesystem behavior, async races, or service availability. The practical split is:
+\begin{itemize}[leftmargin=1.5em]
+\item \textbf{Verus}: pure policy kernel
+\item \textbf{tests}: I/O and operational integration
+\end{itemize}
+
+\section{Conclusion}
+VeriCore is now past the point where detached proof sketches alone are the main value. Both the ingress decision kernel and the default channel/context/integrity mapping have been extracted, Verus-verified, and wired into production. 21 functions are verified with 0 errors, and the same functions are called by production policy decisions.
+
+The next targets---mindlock transition logic and receipt authorization---are structurally similar: small pure functions with clear invariants. The verified surface will grow incrementally while keeping the proof boundary tight.
+
+That combination---verified deterministic policy plus tested transport and operational boundaries---is the strongest realistic path for this architecture.
+
+\end{document}

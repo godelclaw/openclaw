@@ -1,0 +1,11 @@
+[package]
+name = "vericore-policy"
+version = "0.1.0"
+edition = "2021"
+description = "Verified decision kernel for VeriCore policy enforcement"
+
+[dependencies]
+vstd = { git = "https://github.com/verus-lang/verus.git", rev = "9f21168e" }
+
+[package.metadata.verus]
+verify = true
