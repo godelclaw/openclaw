@@ -25,6 +25,10 @@ import type {
   TelegramTopicConfig,
 } from "../config/types.js";
 import { danger, logVerbose, warn } from "../globals.js";
+import {
+  formatModelResolutionStatusLine,
+  readLastModelResolution,
+} from "../infra/model-resolution-log.js";
 import { enqueueSystemEvent } from "../infra/system-events.js";
 import { MediaFetchError } from "../media/fetch.js";
 import { readChannelAllowFromStore } from "../pairing/pairing-store.js";
@@ -128,9 +132,7 @@ function isMemoryQueryCommand(command?: string | null): boolean {
   }
   const normalized = command.trim().toLowerCase();
   return (
-    normalized === "memory-query" ||
-    normalized === "memory_query" ||
-    normalized === "memoryquery"
+    normalized === "memory-query" || normalized === "memory_query" || normalized === "memoryquery"
   );
 }
 
@@ -261,7 +263,9 @@ function parseMindlockMenuArgs(text?: string): {
   return { box: normalized as "in" | "out" | "pending" | "rejected", limit };
 }
 
-function normalizeMemoryTierToken(raw: string): "public" | "family" | "private" | "top_secret" | undefined {
+function normalizeMemoryTierToken(
+  raw: string,
+): "public" | "family" | "private" | "top_secret" | undefined {
   const normalized = raw.trim().toLowerCase();
   if (normalized === "public") {
     return "public";
@@ -386,7 +390,10 @@ function formatMindlockPendingMessage(result: VeriCoreMindlockPendingResult): st
     if (item.reviewer_assessment?.status === "pending") {
       return [main, `   \u{1F50D} Reviewer: pending`];
     } else if (item.reviewer_assessment?.verdict && item.reviewer_assessment?.reason) {
-      return [main, `   \u{1F50D} Reviewer: ${item.reviewer_assessment.verdict} \u2014 ${item.reviewer_assessment.reason}`];
+      return [
+        main,
+        `   \u{1F50D} Reviewer: ${item.reviewer_assessment.verdict} \u2014 ${item.reviewer_assessment.reason}`,
+      ];
     }
     return [main];
   });
@@ -444,7 +451,10 @@ function formatMindlockListMessage(result: VeriCoreMindlockListResult): string {
     if (item.reviewer_assessment?.status === "pending") {
       return [main, `   \u{1F50D} Reviewer: pending`];
     } else if (item.reviewer_assessment?.verdict && item.reviewer_assessment?.reason) {
-      return [main, `   \u{1F50D} Reviewer: ${item.reviewer_assessment.verdict} \u2014 ${item.reviewer_assessment.reason}`];
+      return [
+        main,
+        `   \u{1F50D} Reviewer: ${item.reviewer_assessment.verdict} \u2014 ${item.reviewer_assessment.reason}`,
+      ];
     }
     return [main];
   });
@@ -454,20 +464,13 @@ function formatMindlockListMessage(result: VeriCoreMindlockListResult): string {
       ? `As of: ${new Date(result.as_of_ts * 1000).toISOString()}`
       : undefined;
 
-  return [
-    `Mindlock ${result.box} (${result.count}):`,
-    asOf,
-    ...lines,
-  ]
+  return [`Mindlock ${result.box} (${result.count}):`, asOf, ...lines]
     .filter((line) => line !== undefined && line.trim().length > 0)
     .join("\n");
 }
 
 function formatMindlockDecisionMessage(result: VeriCoreMindlockDecisionResult): string {
-  const lines = [
-    `Mindlock ${result.status}: ${result.id}`,
-    `- source: ${result.source}`,
-  ];
+  const lines = [`Mindlock ${result.status}: ${result.id}`, `- source: ${result.source}`];
 
   if (result.target) {
     lines.push(`- target: ${result.target}`);
@@ -847,12 +850,19 @@ export const registerTelegramHandlers = ({
           const buttons = buildProviderKeyboard(providerInfos);
           const keyboard = buildInlineKeyboard(buttons);
           const messageThreadId = (params.msg as { message_thread_id?: number }).message_thread_id;
+          const modelsAgentDir = resolveAgentDir(cfg, resolveDefaultAgentId(cfg));
+          const lastResolutionLine = formatModelResolutionStatusLine(
+            readLastModelResolution(modelsAgentDir),
+          );
+          const text = ["Select a provider:", lastResolutionLine].filter(Boolean).join("\n");
           await withTelegramApiErrorLogging({
             operation: "sendMessage",
             runtime,
             fn: () =>
-              bot.api.sendMessage(params.msg.chat.id, "Select a provider:", {
-                ...(typeof messageThreadId === "number" ? { message_thread_id: messageThreadId } : {}),
+              bot.api.sendMessage(params.msg.chat.id, text, {
+                ...(typeof messageThreadId === "number"
+                  ? { message_thread_id: messageThreadId }
+                  : {}),
                 ...(keyboard ? { reply_markup: keyboard } : {}),
               }),
           });
@@ -906,10 +916,7 @@ export const registerTelegramHandlers = ({
         try {
           const query = parseMemoryQueryText(params.msg.text ?? params.msg.caption ?? "");
           if (!query) {
-            await sendVeriCoreDriverResponse(
-              params.msg,
-              "Usage: /memory-query <your query text>",
-            );
+            await sendVeriCoreDriverResponse(params.msg, "Usage: /memory-query <your query text>");
             return;
           }
 
@@ -983,10 +990,7 @@ export const registerTelegramHandlers = ({
         isMindlockRejectCommand(route.command)
       ) {
         if (!isMindlockOwnerSender(params.msg)) {
-          await sendVeriCoreDriverResponse(
-            params.msg,
-            "Mindlock review commands are owner-only.",
-          );
+          await sendVeriCoreDriverResponse(params.msg, "Mindlock review commands are owner-only.");
           return;
         }
 
@@ -1004,11 +1008,7 @@ export const registerTelegramHandlers = ({
               return;
             }
 
-            const listing = await runVeriCoreMindlockList(
-              parsed.box,
-              stimulusInput,
-              parsed.limit,
-            );
+            const listing = await runVeriCoreMindlockList(parsed.box, stimulusInput, parsed.limit);
             await sendVeriCoreDriverResponse(params.msg, formatMindlockListMessage(listing));
             return;
           } catch (err) {
@@ -1035,10 +1035,7 @@ export const registerTelegramHandlers = ({
         if (isMindlockApproveCommand(route.command)) {
           const parsed = parseMindlockArtifactArgs(params.msg.text ?? params.msg.caption ?? "");
           if (!parsed.artifactId) {
-            await sendVeriCoreDriverResponse(
-              params.msg,
-              "Usage: /a <artifact_id|index> [reason]",
-            );
+            await sendVeriCoreDriverResponse(params.msg, "Usage: /a <artifact_id|index> [reason]");
             return;
           }
 
@@ -1181,7 +1178,6 @@ export const registerTelegramHandlers = ({
     }
   };
 
-
   const inboundDebouncer = createInboundDebouncer<TelegramDebounceEntry>({
     debounceMs,
     resolveDebounceMs: (entry) =>
@@ -1210,12 +1206,17 @@ export const registerTelegramHandlers = ({
         return;
       }
       if (entries.length === 1) {
-
         const replyMedia = await resolveReplyMediaForMessage(last.ctx, last.msg);
         await handleIngressWithVeriCore({
           msg: last.msg,
           onFallback: async () => {
-            await processMessage(last.ctx, last.allMedia, last.storeAllowFrom, undefined, replyMedia);
+            await processMessage(
+              last.ctx,
+              last.allMedia,
+              last.storeAllowFrom,
+              undefined,
+              replyMedia,
+            );
           },
         });
 
@@ -1252,7 +1253,6 @@ export const registerTelegramHandlers = ({
           );
         },
       });
-
     },
     onError: (err) => {
       runtime.error?.(danger(`telegram debounce flush failed: ${String(err)}`));
@@ -1365,7 +1365,6 @@ export const registerTelegramHandlers = ({
         }
       }
 
-
       const storeAllowFrom = await loadStoreAllowFrom();
       const replyMedia = await resolveReplyMediaForMessage(primaryEntry.ctx, primaryEntry.msg);
       await handleIngressWithVeriCore({
@@ -1374,7 +1373,6 @@ export const registerTelegramHandlers = ({
           await processMessage(primaryEntry.ctx, allMedia, storeAllowFrom, undefined, replyMedia);
         },
       });
-
     } catch (err) {
       runtime.error?.(danger(`media group handler failed: ${String(err)}`));
     }
@@ -1404,7 +1402,6 @@ export const registerTelegramHandlers = ({
       const storeAllowFrom = await loadStoreAllowFrom();
       const baseCtx = first.ctx;
 
-
       const syntheticCtx = buildSyntheticContext(baseCtx, syntheticMessage);
       await handleIngressWithVeriCore({
         msg: syntheticMessage,
@@ -1413,7 +1410,6 @@ export const registerTelegramHandlers = ({
             messageIdOverride: String(last.msg.message_id),
           });
         },
-
       });
     } catch (err) {
       runtime.error?.(danger(`text fragment handler failed: ${String(err)}`));
@@ -1495,7 +1491,6 @@ export const registerTelegramHandlers = ({
         senderId,
         senderUsername,
       }));
-
 
   const shouldSkipGroupByCooldown = (params: {
     isGroup: boolean;
@@ -2347,12 +2342,16 @@ export const registerTelegramHandlers = ({
           await handleIngressWithVeriCore({
             msg: syntheticMessage,
             onFallback: async () => {
-              await processMessage(buildSyntheticContext(ctx, syntheticMessage), [], storeAllowFrom, {
-                forceWasMentioned: true,
-                messageIdOverride: callback.id,
-              });
+              await processMessage(
+                buildSyntheticContext(ctx, syntheticMessage),
+                [],
+                storeAllowFrom,
+                {
+                  forceWasMentioned: true,
+                  messageIdOverride: callback.id,
+                },
+              );
             },
-
           });
           return;
         }
@@ -2364,7 +2363,6 @@ export const registerTelegramHandlers = ({
         base: callbackMessage,
         from: callback.from,
         text: data,
-
       });
       await handleIngressWithVeriCore({
         msg: syntheticMessage,
@@ -2374,7 +2372,6 @@ export const registerTelegramHandlers = ({
             messageIdOverride: callback.id,
           });
         },
-
       });
     } catch (err) {
       runtime.error?.(danger(`callback handler failed: ${String(err)}`));

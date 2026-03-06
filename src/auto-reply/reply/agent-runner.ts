@@ -1,15 +1,13 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
-import type { TypingMode } from "../../config/types.js";
-import type { OriginatingChannelType, TemplateContext } from "../templating.js";
-import type { GetReplyOptions, ReplyPayload } from "../types.js";
-import type { TypingController } from "./typing.js";
+import { resolveRunModelFallbacksOverride } from "../../agents/agent-scope.js";
 import { lookupContextTokens } from "../../agents/context.js";
 import { DEFAULT_CONTEXT_TOKENS } from "../../agents/defaults.js";
 import { resolveModelAuthMode } from "../../agents/model-auth.js";
 import { isCliProvider } from "../../agents/model-selection.js";
 import { queueEmbeddedPiMessage } from "../../agents/pi-embedded.js";
 import { hasNonzeroUsage } from "../../agents/usage.js";
+import { resolveAgentModelFallbackValues } from "../../config/model-input.js";
 import {
   resolveAgentIdFromSessionKey,
   resolveSessionFilePath,
@@ -18,10 +16,19 @@ import {
   updateSessionStore,
   updateSessionStoreEntry,
 } from "../../config/sessions.js";
+import type { TypingMode } from "../../config/types.js";
 import { emitDiagnosticEvent, isDiagnosticsEnabled } from "../../infra/diagnostic-events.js";
+import {
+  appendModelResolutionLog,
+  classifyFallbackReason,
+  formatModelFallbackAlert,
+  shouldSendFallbackAlert,
+} from "../../infra/model-resolution-log.js";
 import { defaultRuntime } from "../../runtime.js";
 import { estimateUsageCost, resolveModelCostConfig } from "../../utils/usage-format.js";
+import type { OriginatingChannelType, TemplateContext } from "../templating.js";
 import { resolveResponseUsageMode, type VerboseLevel } from "../thinking.js";
+import type { GetReplyOptions, ReplyPayload } from "../types.js";
 import { runAgentTurnWithFallback } from "./agent-runner-execution.js";
 import {
   createShouldEmitToolOutput,
@@ -38,9 +45,11 @@ import { resolveBlockStreamingCoalescing } from "./block-streaming.js";
 import { createFollowupRunner } from "./followup-runner.js";
 import { enqueueFollowupRun, type FollowupRun, type QueueSettings } from "./queue.js";
 import { createReplyToModeFilterForChannel, resolveReplyToMode } from "./reply-threading.js";
+import { routeReply } from "./route-reply.js";
 import { incrementCompactionCount } from "./session-updates.js";
 import { persistSessionUsageUpdate } from "./session-usage.js";
 import { createTypingSignaler } from "./typing-mode.js";
+import type { TypingController } from "./typing.js";
 
 const BLOCK_REPLY_SEND_TIMEOUT_MS = 15_000;
 
@@ -335,7 +344,8 @@ export async function runReplyAgent(params: {
       return finalizeWithFollowup(runOutcome.payload, queueKey, runFollowupTurn);
     }
 
-    const { runResult, fallbackProvider, fallbackModel, directlySentBlockKeys } = runOutcome;
+    const { runResult, fallbackProvider, fallbackModel, fallbackAttempts, directlySentBlockKeys } =
+      runOutcome;
     let { didLogHeartbeatStrip, autoCompactionCompleted } = runOutcome;
 
     if (
@@ -395,6 +405,73 @@ export async function runReplyAgent(params: {
       cliSessionId,
     });
 
+    // Model resolution audit logging
+    {
+      const configuredPrimary = `${followupRun.run.provider}/${followupRun.run.model}`;
+      const modelChanged =
+        modelUsed !== followupRun.run.model || providerUsed !== followupRun.run.provider;
+      const providerChanged = providerUsed !== followupRun.run.provider;
+      const fallbackReason = classifyFallbackReason(fallbackAttempts);
+      const resolved = `${providerUsed}/${modelUsed}`;
+      const configuredFallbacks =
+        resolveRunModelFallbacksOverride({
+          cfg: followupRun.run.config,
+          agentId: followupRun.run.agentId,
+          sessionKey: followupRun.run.sessionKey,
+        }) ?? resolveAgentModelFallbackValues(followupRun.run.config?.agents?.defaults?.model);
+
+      await appendModelResolutionLog(followupRun.run.agentDir, {
+        ts: new Date().toISOString(),
+        runId: runOutcome.runId,
+        kind: "primary",
+        sessionKey,
+        configuredPrimary,
+        configuredFallbacks,
+        resolvedModel: modelUsed,
+        resolvedProvider: providerUsed,
+        resolvedProfile: runResult.meta.agentMeta?.authProfileId,
+        modelChanged,
+        providerChanged,
+        fallbackReason,
+        attempts: fallbackAttempts,
+        usage: usage ? { input: usage.input, output: usage.output } : undefined,
+      });
+
+      if (modelChanged || providerChanged) {
+        const msg = formatModelFallbackAlert({
+          configuredPrimary,
+          resolvedProvider: providerUsed,
+          resolvedModel: modelUsed,
+          providerChanged,
+          fallbackReason,
+        });
+        defaultRuntime.error(msg);
+
+        const chatType = String(sessionCtx.ChatType ?? "")
+          .trim()
+          .toLowerCase();
+        const alertTo = String(sessionCtx.OriginatingTo ?? sessionCtx.To ?? "").trim();
+        const isTelegramDm =
+          replyToChannel === "telegram" &&
+          alertTo.length > 0 &&
+          ["private", "dm", "direct"].includes(chatType);
+        if (isTelegramDm && shouldSendFallbackAlert(configuredPrimary, resolved)) {
+          const alertResult = await routeReply({
+            payload: { text: msg },
+            channel: "telegram",
+            to: alertTo,
+            accountId: sessionCtx.AccountId,
+            cfg,
+            mirror: false,
+          });
+          if (!alertResult.ok) {
+            defaultRuntime.error(
+              `model fallback alert delivery failed: ${alertResult.error ?? "unknown error"}`,
+            );
+          }
+        }
+      }
+    }
 
     // Drain any late tool/block deliveries before deciding there's "nothing to send".
     // Otherwise, a late typing trigger (e.g. from a tool callback) can outlive the run and
@@ -490,7 +567,6 @@ export async function runReplyAgent(params: {
       if (formatted) {
         responseUsageLine = formatted;
       }
-
     }
     // If verbose is enabled and this is a new session, prepend a session hint.
     let finalPayloads = replyPayloads;

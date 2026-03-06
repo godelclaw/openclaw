@@ -189,6 +189,12 @@ export const AgentDefaultsSchema = z
       })
       .strict()
       .optional(),
+    modelPolicy: z
+      .object({
+        allowCrossProviderFallback: z.boolean().optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict()
   .optional();

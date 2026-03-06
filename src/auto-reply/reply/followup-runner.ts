@@ -5,10 +5,17 @@ import { lookupContextTokens } from "../../agents/context.js";
 import { DEFAULT_CONTEXT_TOKENS } from "../../agents/defaults.js";
 import { runWithModelFallback } from "../../agents/model-fallback.js";
 import { runEmbeddedPiAgent } from "../../agents/pi-embedded.js";
+import { resolveAgentModelFallbackValues } from "../../config/model-input.js";
 import type { SessionEntry } from "../../config/sessions.js";
 import type { TypingMode } from "../../config/types.js";
 import { logVerbose } from "../../globals.js";
 import { registerAgentRunContext } from "../../infra/agent-events.js";
+import {
+  appendModelResolutionLog,
+  classifyFallbackReason,
+  formatModelFallbackAlert,
+  shouldSendFallbackAlert,
+} from "../../infra/model-resolution-log.js";
 import { defaultRuntime } from "../../runtime.js";
 import { isInternalMessageChannel } from "../../utils/message-channel.js";
 import { stripHeartbeatToken } from "../heartbeat.js";
@@ -149,6 +156,12 @@ export function createFollowupRunner(params: {
       let runResult: Awaited<ReturnType<typeof runEmbeddedPiAgent>>;
       let fallbackProvider = queued.run.provider;
       let fallbackModel = queued.run.model;
+      let fallbackAttempts: Array<{
+        provider: string;
+        model: string;
+        error: string;
+        reason?: string;
+      }> = [];
       const activeSessionEntry =
         (sessionKey ? sessionStore?.[sessionKey] : undefined) ?? sessionEntry;
       let bootstrapPromptWarningSignaturesSeen = resolveBootstrapWarningSignaturesSeen(
@@ -235,6 +248,7 @@ export function createFollowupRunner(params: {
         runResult = fallbackResult.result;
         fallbackProvider = fallbackResult.provider;
         fallbackModel = fallbackResult.model;
+        fallbackAttempts = fallbackResult.attempts;
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         defaultRuntime.error?.(`Followup agent failed before reply: ${message}`);
@@ -263,6 +277,74 @@ export function createFollowupRunner(params: {
           systemPromptReport: runResult.meta?.systemPromptReport,
           logLabel: "followup",
         });
+      }
+
+      // Model resolution audit logging (followup run)
+      {
+        const configuredPrimary = `${queued.run.provider}/${queued.run.model}`;
+        const modelChanged =
+          modelUsed !== queued.run.model || fallbackProvider !== queued.run.provider;
+        const providerChanged = fallbackProvider !== queued.run.provider;
+        const fallbackReason = classifyFallbackReason(fallbackAttempts);
+        const resolved = `${fallbackProvider}/${modelUsed}`;
+        const configuredFallbacks =
+          resolveRunModelFallbacksOverride({
+            cfg: queued.run.config,
+            agentId: queued.run.agentId,
+            sessionKey: queued.run.sessionKey,
+          }) ?? resolveAgentModelFallbackValues(queued.run.config?.agents?.defaults?.model);
+
+        await appendModelResolutionLog(queued.run.agentDir, {
+          ts: new Date().toISOString(),
+          runId,
+          kind: "followup",
+          sessionKey,
+          configuredPrimary,
+          configuredFallbacks,
+          resolvedModel: modelUsed,
+          resolvedProvider: fallbackProvider,
+          resolvedProfile: runResult.meta?.agentMeta?.authProfileId,
+          modelChanged,
+          providerChanged,
+          fallbackReason,
+          attempts: fallbackAttempts,
+          usage: usage ? { input: usage.input, output: usage.output } : undefined,
+        });
+
+        if (modelChanged || providerChanged) {
+          const msg = formatModelFallbackAlert({
+            configuredPrimary,
+            resolvedProvider: fallbackProvider,
+            resolvedModel: modelUsed,
+            providerChanged,
+            fallbackReason,
+          });
+          defaultRuntime.error(`${msg} (followup)`);
+
+          const chatType = String(queued.originatingChatType ?? "")
+            .trim()
+            .toLowerCase();
+          const alertTo = String(queued.originatingTo ?? "").trim();
+          const isTelegramDm =
+            queued.originatingChannel === "telegram" &&
+            alertTo.length > 0 &&
+            ["private", "dm", "direct"].includes(chatType);
+          if (isTelegramDm && shouldSendFallbackAlert(configuredPrimary, resolved)) {
+            const alertResult = await routeReply({
+              payload: { text: msg },
+              channel: "telegram",
+              to: alertTo,
+              accountId: queued.originatingAccountId,
+              cfg: queued.run.config,
+              mirror: false,
+            });
+            if (!alertResult.ok) {
+              defaultRuntime.error(
+                `followup model fallback alert delivery failed: ${alertResult.error ?? "unknown error"}`,
+              );
+            }
+          }
+        }
       }
 
       const payloadArray = runResult.payloads ?? [];

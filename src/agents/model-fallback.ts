@@ -474,6 +474,22 @@ export async function runWithModelFallback<T>(params: {
 
   for (let i = 0; i < candidates.length; i += 1) {
     const candidate = candidates[i];
+
+    // Policy gate: block cross-provider fallback when disabled.
+    if (i > 0 && candidate.provider !== params.provider) {
+      const allowCross =
+        params.cfg?.agents?.defaults?.modelPolicy?.allowCrossProviderFallback ?? true;
+      if (!allowCross) {
+        attempts.push({
+          provider: candidate.provider,
+          model: candidate.model,
+          error: "cross-provider fallback disabled by policy",
+          reason: "unknown" as FailoverReason,
+        });
+        continue;
+      }
+    }
+
     let runOptions: ModelFallbackRunOptions | undefined;
     if (authStore) {
       const profileIds = resolveAuthProfileOrder({

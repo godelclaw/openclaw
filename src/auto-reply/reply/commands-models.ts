@@ -12,6 +12,10 @@ import {
 import type { OpenClawConfig } from "../../config/config.js";
 import type { SessionEntry } from "../../config/sessions.js";
 import {
+  formatModelResolutionStatusLine,
+  readLastModelResolution,
+} from "../../infra/model-resolution-log.js";
+import {
   buildModelsKeyboard,
   buildProviderKeyboard,
   calculateTotalPages,
@@ -233,6 +237,9 @@ export async function resolveModelsCommandReply(params: {
 
   const { byProvider, providers } = await buildModelsProviderData(params.cfg);
   const isTelegram = params.surface === "telegram";
+  const lastResolutionLine = formatModelResolutionStatusLine(
+    readLastModelResolution(params.agentDir),
+  );
 
   // Provider list (no provider specified)
   if (!provider) {
@@ -243,7 +250,7 @@ export async function resolveModelsCommandReply(params: {
         count: byProvider.get(p)?.size ?? 0,
       }));
       const buttons = buildProviderKeyboard(providerInfos);
-      const text = "Select a provider:";
+      const text = ["Select a provider:", lastResolutionLine].filter(Boolean).join("\n");
       return {
         text,
         channelData: { telegram: { buttons } },
@@ -253,6 +260,7 @@ export async function resolveModelsCommandReply(params: {
     // Text fallback for non-Telegram surfaces
     const lines: string[] = [
       "Providers:",
+      ...(lastResolutionLine ? [lastResolutionLine, ""] : []),
       ...providers.map((p) =>
         formatProviderLine({ provider: p, count: byProvider.get(p)?.size ?? 0 }),
       ),
@@ -309,13 +317,18 @@ export async function resolveModelsCommandReply(params: {
       pageSize: telegramPageSize,
     });
 
-    const text = formatModelsAvailableHeader({
-      provider,
-      total,
-      cfg: params.cfg,
-      agentDir: params.agentDir,
-      sessionEntry: params.sessionEntry,
-    });
+    const text = [
+      formatModelsAvailableHeader({
+        provider,
+        total,
+        cfg: params.cfg,
+        agentDir: params.agentDir,
+        sessionEntry: params.sessionEntry,
+      }),
+      lastResolutionLine,
+    ]
+      .filter(Boolean)
+      .join("\n");
     return {
       text,
       channelData: { telegram: { buttons } },

@@ -14,6 +14,10 @@ import { toAgentModelListLike } from "../../config/model-input.js";
 import type { SessionEntry, SessionScope } from "../../config/sessions.js";
 import { logVerbose } from "../../globals.js";
 import {
+  formatModelResolutionStatusLine,
+  readLastModelResolution,
+} from "../../infra/model-resolution-log.js";
+import {
   formatUsageWindowSummary,
   loadProviderUsageSummary,
   resolveUsageProviderId,
@@ -116,6 +120,10 @@ export async function buildStatusReply(params: {
     sessionEntry?.queueDebounceMs ?? sessionEntry?.queueCap ?? sessionEntry?.queueDrop,
   );
 
+  const lastResolutionLine = formatModelResolutionStatusLine(
+    readLastModelResolution(statusAgentDir),
+  );
+
   let subagentsLine: string | undefined;
   if (sessionKey) {
     const { mainKey, alias } = resolveMainSessionAlias(cfg);
@@ -187,6 +195,7 @@ export async function buildStatusReply(params: {
     modelAuth: selectedModelAuth,
     activeModelAuth,
     usageLine: usageLine ?? undefined,
+    resolutionLine: lastResolutionLine,
     queue: {
       mode: queueSettings.mode,
       depth: queueDepth,

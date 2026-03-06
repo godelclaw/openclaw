@@ -286,6 +286,11 @@ export type AgentDefaultsConfig = {
   };
   /** Optional sandbox settings for non-main sessions. */
   sandbox?: AgentSandboxConfig;
+  /** Model selection and fallback policy. */
+  modelPolicy?: {
+    /** Allow fallback to a different provider (e.g. anthropic -> openrouter). Default: true. */
+    allowCrossProviderFallback?: boolean;
+  };
 };
 
 export type AgentCompactionMode = "default" | "safeguard";
