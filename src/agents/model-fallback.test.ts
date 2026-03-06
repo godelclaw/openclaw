@@ -306,7 +306,7 @@ describe("runWithModelFallback", () => {
     ]);
   });
 
-  it("keeps configured fallback chain when current model is a configured fallback", async () => {
+  it("returns to configured primary before continuing the chain when current model is a configured fallback", async () => {
     const cfg = makeCfg({
       agents: {
         defaults: {
@@ -321,6 +321,9 @@ describe("runWithModelFallback", () => {
     const run = vi.fn().mockImplementation(async (provider: string, model: string) => {
       if (provider === "anthropic" && model === "claude-haiku-3-5") {
         throw Object.assign(new Error("rate-limited"), { status: 429 });
+      }
+      if (provider === "openai" && model === "gpt-4.1-mini") {
+        throw Object.assign(new Error("primary still overloaded"), { status: 429 });
       }
       if (provider === "openrouter" && model === "openrouter/deepseek-chat") {
         return "ok";
@@ -340,6 +343,7 @@ describe("runWithModelFallback", () => {
     expect(result.model).toBe("openrouter/deepseek-chat");
     expect(run.mock.calls).toEqual([
       ["anthropic", "claude-haiku-3-5"],
+      ["openai", "gpt-4.1-mini"],
       ["openrouter", "openrouter/deepseek-chat"],
     ]);
   });
@@ -1028,6 +1032,40 @@ describe("runWithModelFallback", () => {
       expect(run).toHaveBeenNthCalledWith(2, "anthropic", "claude-opus-4-6"); // Config primary as final fallback
     });
 
+    it("prefers configured primary immediately when session is on a configured fallback", async () => {
+      const cfg = makeCfg({
+        agents: {
+          defaults: {
+            model: {
+              primary: "anthropic/claude-opus-4-6",
+              fallbacks: [
+                "openai-codex/gpt-5.4",
+                "anthropic/claude-sonnet-4-6",
+                "openrouter/x-ai/grok-4.1-fast",
+              ],
+            },
+          },
+        },
+      });
+
+      const run = vi
+        .fn()
+        .mockRejectedValueOnce(new Error("Rate limit exceeded"))
+        .mockResolvedValueOnce("back on primary");
+
+      const result = await runWithModelFallback({
+        cfg,
+        provider: "openai-codex",
+        model: "gpt-5.4",
+        run,
+      });
+
+      expect(result.result).toBe("back on primary");
+      expect(run).toHaveBeenCalledTimes(2);
+      expect(run).toHaveBeenNthCalledWith(1, "openai-codex", "gpt-5.4");
+      expect(run).toHaveBeenNthCalledWith(2, "anthropic", "claude-opus-4-6");
+    });
+
     it("uses fallbacks when session model exactly matches config primary", async () => {
       const cfg = makeCfg({
         agents: {
@@ -1055,6 +1093,40 @@ describe("runWithModelFallback", () => {
       expect(result.result).toBe("fallback worked");
       expect(run).toHaveBeenCalledTimes(2);
       expect(run).toHaveBeenNthCalledWith(2, "groq", "llama-3.3-70b-versatile");
+    });
+
+    it("tries codex first when anthropic primary falls back", async () => {
+      const cfg = makeCfg({
+        agents: {
+          defaults: {
+            model: {
+              primary: "anthropic/claude-opus-4-6",
+              fallbacks: [
+                "openai-codex/gpt-5.4",
+                "anthropic/claude-sonnet-4-6",
+                "openrouter/x-ai/grok-4.1-fast",
+              ],
+            },
+          },
+        },
+      });
+
+      const run = vi
+        .fn()
+        .mockRejectedValueOnce(new Error("Timeout"))
+        .mockResolvedValueOnce("codex worked");
+
+      const result = await runWithModelFallback({
+        cfg,
+        provider: "anthropic",
+        model: "claude-opus-4-6",
+        run,
+      });
+
+      expect(result.result).toBe("codex worked");
+      expect(run).toHaveBeenCalledTimes(2);
+      expect(run).toHaveBeenNthCalledWith(1, "anthropic", "claude-opus-4-6");
+      expect(run).toHaveBeenNthCalledWith(2, "openai-codex", "gpt-5.4");
     });
   });
 

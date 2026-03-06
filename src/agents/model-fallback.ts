@@ -296,10 +296,11 @@ function resolveFallbackCandidates(params: {
     const configuredFallbacks = resolveAgentModelFallbackValues(
       params.cfg?.agents?.defaults?.model,
     );
-    // When user runs a different provider than config, only use configured fallbacks
-    // if the current model is already in that chain (e.g. session on first fallback).
+    // When a session is already running on a configured fallback from another
+    // provider, bounce back to the configured primary first. This keeps the
+    // chain symmetric for "Anthropic -> Codex" and "Codex -> Anthropic".
     if (normalizedPrimary.provider !== configuredPrimary.provider) {
-      const isConfiguredFallback = configuredFallbacks.some((raw) => {
+      const matchedConfiguredFallback = configuredFallbacks.find((raw) => {
         const resolved = resolveModelRefFromString({
           raw: String(raw ?? ""),
           defaultProvider,
@@ -307,7 +308,13 @@ function resolveFallbackCandidates(params: {
         });
         return resolved ? sameModelCandidate(resolved.ref, normalizedPrimary) : false;
       });
-      return isConfiguredFallback ? configuredFallbacks : [];
+      if (!matchedConfiguredFallback) {
+        return [];
+      }
+      return [
+        `${configuredPrimary.provider}/${configuredPrimary.model}`,
+        ...configuredFallbacks.filter((raw) => raw !== matchedConfiguredFallback),
+      ];
     }
     // Same provider: always use full fallback chain (model version differences within provider).
     return configuredFallbacks;
