@@ -125,8 +125,10 @@ export type VeriCoreMindlockPendingItem = {
   target_path?: string | null;
   reason?: string | null;
   reviewer_assessment?: {
-    verdict: string;
-    reason: string;
+    status?: "pending" | "complete" | "error";
+    source?: string;
+    verdict?: string;
+    reason?: string;
     reviewed_at?: number;
   } | null;
 };

@@ -277,6 +277,7 @@ impl SecurityReviewer {
         let assessment = match result {
             Ok(decision) => {
                 json!({
+                    "status": "complete",
                     "verdict": verdict_name(decision.verdict),
                     "reason": decision.reason,
                     "target_path": target_display,
@@ -286,6 +287,7 @@ impl SecurityReviewer {
             Err(e) => {
                 eprintln!("[vericore] auto_review_for_pending: reviewer error: {e}");
                 json!({
+                    "status": "error",
                     "verdict": "error",
                     "reason": format!("Reviewer failed: {e}"),
                     "target_path": target_display,
@@ -295,13 +297,17 @@ impl SecurityReviewer {
         };
 
         // Write assessment into the meta sidecar.
-        let mut meta_value = meta_json.unwrap_or_else(|| json!({}));
-        if !meta_value.is_object() {
-            meta_value = json!({});
-        }
-        meta_value["reviewer_assessment"] = assessment.clone();
-        if let Ok(updated) = serde_json::to_string_pretty(&meta_value) {
-            let _ = tokio::fs::write(&meta_path, updated.as_bytes()).await;
+        // Tolerate races: if Zar already approved/rejected, meta or artifact may be gone.
+        if let Ok(fresh_raw) = tokio::fs::read(&meta_path).await {
+            let mut meta_value = serde_json::from_slice::<Value>(&fresh_raw)
+                .unwrap_or_else(|_| json!({}));
+            if !meta_value.is_object() {
+                meta_value = json!({});
+            }
+            meta_value["reviewer_assessment"] = assessment.clone();
+            if let Ok(updated) = serde_json::to_string_pretty(&meta_value) {
+                let _ = tokio::fs::write(&meta_path, updated.as_bytes()).await;
+            }
         }
 
         // Append audit event.

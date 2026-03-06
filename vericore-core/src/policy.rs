@@ -243,6 +243,7 @@ impl ContextRoots {
 #[derive(Debug, Clone)]
 pub struct GatePolicy {
     roots: ContextRoots,
+    mindlock_dir: PathBuf,
     network_allowlist: Vec<String>,
     allow_exec_in_private: bool,
     allow_exec_in_family: bool,
@@ -280,6 +281,7 @@ impl GatePolicy {
     pub fn new(roots: ContextRoots, network_allowlist: Vec<String>) -> Self {
         Self {
             roots,
+            mindlock_dir: PathBuf::from("/nonexistent-mindlock-unconfigured"),
             network_allowlist,
             allow_exec_in_private: false,
             allow_exec_in_family: false,
@@ -367,6 +369,7 @@ impl GatePolicy {
 
         Ok(Self {
             roots,
+            mindlock_dir: config.security_review.mindlock_dir.clone(),
             network_allowlist: config.network.allowlist.clone(),
             allow_exec_in_private: config.exec.allow_in_private,
             allow_exec_in_family: config.exec.allow_in_family,
@@ -407,6 +410,11 @@ impl GatePolicy {
 
     pub fn with_exec_in_public(mut self, allow: bool) -> Self {
         self.allow_exec_in_public = allow;
+        self
+    }
+
+    pub fn with_mindlock_dir(mut self, dir: PathBuf) -> Self {
+        self.mindlock_dir = dir;
         self
     }
 
@@ -502,6 +510,27 @@ impl GatePolicy {
     /// - exec requires trusted ingress
     /// - writes to private files require trusted ingress
     /// - writes to sensitive config paths require trusted ingress
+    /// Check if a raw (uncanonicalized) path is safely under mindlock_dir.
+    /// Requires: absolute, lexical prefix match, no ParentDir (..) after prefix.
+    fn is_raw_mindlock_write(&self, path: &Path) -> bool {
+        if !path.is_absolute() {
+            return false;
+        }
+        if !path.starts_with(&self.mindlock_dir) {
+            return false;
+        }
+        let suffix = path.strip_prefix(&self.mindlock_dir).unwrap_or(Path::new(""));
+        !suffix
+            .components()
+            .any(|c| matches!(c, Component::ParentDir))
+    }
+
+    fn is_mindlock_stage_path(&self, path: &Path) -> bool {
+        path.starts_with(self.mindlock_dir.join("in"))
+            || path.starts_with(self.mindlock_dir.join("out"))
+            || path.starts_with(self.mindlock_dir.join("work"))
+    }
+
     pub fn check_ingress_integrity(&self, integrity: IntegrityTier, action: &Action) -> Verdict {
         let primitive = action.executable_action();
 
@@ -517,20 +546,20 @@ impl GatePolicy {
                 }
             }
             Action::WriteFile { path, .. } => {
+                // Mindlock is quarantine: untrusted writes always allowed.
+                // Check raw path first — parent dir may not exist yet.
+                if self.is_raw_mindlock_write(path) {
+                    return Verdict::allow();
+                }
+
                 let canonical = match canonicalize_write_target(path) {
                     Ok(p) => p,
-                    Err(_) => return Verdict::allow(),
+                    Err(err) => return Verdict::deny(err),
                 };
 
                 let target_tier = self.roots.tier_for_path(&canonical);
                 let is_private_write = matches!(target_tier, Some(ContextTier::Private));
                 let is_sensitive_config = is_sensitive_config_path(&canonical);
-                let is_mindlock_write = canonical.starts_with("/home/zarclaw/mindlock");
-
-                // Mindlock is quarantine space: untrusted content may be materialized there.
-                if is_mindlock_write {
-                    return Verdict::allow();
-                }
 
                 if (is_private_write || is_sensitive_config) && integrity != IntegrityTier::Trusted
                 {
@@ -783,11 +812,13 @@ impl GatePolicy {
                     Ok(p) => p,
                     Err(err) => return Verdict::deny(err),
                 };
-                let in_root = Path::new("/home/zarclaw/mindlock/in");
-                let out_root = Path::new("/home/zarclaw/mindlock/out");
+                let in_root = self.mindlock_dir.join("in");
+                let out_root = self.mindlock_dir.join("out");
                 if !source.starts_with(in_root) && !source.starts_with(out_root) {
                     return Verdict::deny(format!(
-                        "promote source must be under /home/zarclaw/mindlock/in or /home/zarclaw/mindlock/out: {}",
+                        "promote source must be under {}/in or {}/out: {}",
+                        self.mindlock_dir.display(),
+                        self.mindlock_dir.display(),
                         source.display()
                     ));
                 }
@@ -823,10 +854,11 @@ impl GatePolicy {
                     Ok(p) => p,
                     Err(err) => return Verdict::deny(err),
                 };
-                if !is_mindlock_stage_path(&source) {
+                if !self.is_mindlock_stage_path(&source) {
                     return Verdict::deny(format!(
-                        "request_review source must be under /home/zarclaw/mindlock/in, /home/zarclaw/mindlock/out, or /home/zarclaw/mindlock/work: {}",
-                        source.display()
+                        "request_review source must be under {ml}/in, {ml}/out, or {ml}/work: {}",
+                        source.display(),
+                        ml = self.mindlock_dir.display()
                     ));
                 }
                 let target = match canonicalize_write_target(target_path) {
@@ -849,12 +881,13 @@ impl GatePolicy {
                     Ok(p) => p,
                     Err(err) => return Verdict::deny(err),
                 };
-                if is_mindlock_stage_path(&source) {
+                if self.is_mindlock_stage_path(&source) {
                     Verdict::allow()
                 } else {
                     Verdict::deny(format!(
-                        "self_escalate source must be under /home/zarclaw/mindlock/in, /home/zarclaw/mindlock/out, or /home/zarclaw/mindlock/work: {}",
-                        source.display()
+                        "self_escalate source must be under {ml}/in, {ml}/out, or {ml}/work: {}",
+                        source.display(),
+                        ml = self.mindlock_dir.display()
                     ))
                 }
             }
@@ -962,11 +995,7 @@ fn list_allows(list: &[String], value: &str) -> bool {
         .any(|entry| entry == "*" || entry.eq_ignore_ascii_case(value))
 }
 
-fn is_mindlock_stage_path(path: &Path) -> bool {
-    path.starts_with("/home/zarclaw/mindlock/in")
-        || path.starts_with("/home/zarclaw/mindlock/out")
-        || path.starts_with("/home/zarclaw/mindlock/work")
-}
+
 
 fn canonicalize_dir(path: &Path) -> Result<PathBuf, String> {
     let canonical = fs::canonicalize(path)
@@ -1119,6 +1148,7 @@ fn is_local_or_private_host(host: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::path::PathBuf;
 
     use crate::config::Config;
     use crate::types::{Action, Channel, ContextTier, IntegrityTier};
@@ -1140,6 +1170,15 @@ mod tests {
         fs::create_dir_all(&private).expect("private dir");
         fs::create_dir_all(&family).expect("family dir");
         (base, private, family)
+    }
+
+    fn make_test_dirs_with_mindlock() -> (PathBuf, PathBuf, PathBuf, PathBuf) {
+        let (base, private, family) = make_test_dirs();
+        let mindlock = base.join("mindlock");
+        fs::create_dir_all(mindlock.join("in")).expect("mindlock/in");
+        fs::create_dir_all(mindlock.join("out")).expect("mindlock/out");
+        fs::create_dir_all(mindlock.join("work")).expect("mindlock/work");
+        (base, private, family, mindlock)
     }
 
     #[test]
@@ -1374,19 +1413,100 @@ utc_offset = 0
 
     #[test]
     fn untrusted_ingress_can_write_into_mindlock() {
-        let (base, private, family) = make_test_dirs();
+        let (base, private, family, mindlock) = make_test_dirs_with_mindlock();
         let roots = super::ContextRoots::new(&base, &private, &family).expect("roots");
-        let policy = GatePolicy::new(roots, vec![]);
+        let policy = GatePolicy::new(roots, vec![]).with_mindlock_dir(mindlock.clone());
 
         let verdict = policy.check_ingress_integrity(
             IntegrityTier::Untrusted,
             &Action::WriteFile {
-                path: std::path::PathBuf::from("/home/zarclaw/mindlock/in/artifact.txt"),
+                path: mindlock.join("in/artifact.txt"),
                 content: "x".to_string(),
             },
         );
-
         assert!(verdict.is_allowed());
+    }
+
+    #[test]
+    fn untrusted_ingress_denied_for_nonexistent_private_path() {
+        let (base, private, family, mindlock) = make_test_dirs_with_mindlock();
+        let roots = super::ContextRoots::new(&base, &private, &family).expect("roots");
+        let policy = GatePolicy::new(roots, vec![]).with_mindlock_dir(mindlock);
+
+        // Parent doesn't exist -> canonicalization fails -> must deny
+        let verdict = policy.check_ingress_integrity(
+            IntegrityTier::Untrusted,
+            &Action::WriteFile {
+                path: private.join("nonexistent-subdir/evil.sh"),
+                content: "malicious".to_string(),
+            },
+        );
+        assert!(!verdict.is_allowed());
+    }
+
+    #[test]
+    fn mindlock_traversal_bypass_denied() {
+        let (base, private, family, mindlock) = make_test_dirs_with_mindlock();
+        let roots = super::ContextRoots::new(&base, &private, &family).expect("roots");
+        let policy = GatePolicy::new(roots, vec![]).with_mindlock_dir(mindlock.clone());
+
+        // Traversal: mindlock/../private/evil.sh should NOT be treated as mindlock write
+        let traversal_path = mindlock.join("../private/evil.sh");
+        let verdict = policy.check_ingress_integrity(
+            IntegrityTier::Untrusted,
+            &Action::WriteFile {
+                path: traversal_path,
+                content: "malicious".to_string(),
+            },
+        );
+        assert!(!verdict.is_allowed(), "traversal bypass must be denied");
+    }
+
+    #[test]
+    fn deep_mindlock_write_allowed() {
+        let (base, private, family, mindlock) = make_test_dirs_with_mindlock();
+        let roots = super::ContextRoots::new(&base, &private, &family).expect("roots");
+        let policy = GatePolicy::new(roots, vec![]).with_mindlock_dir(mindlock.clone());
+
+        let verdict = policy.check_ingress_integrity(
+            IntegrityTier::Untrusted,
+            &Action::WriteFile {
+                path: mindlock.join("in/subdir/file.txt"),
+                content: "ok".to_string(),
+            },
+        );
+        assert!(verdict.is_allowed());
+    }
+
+    #[test]
+    fn custom_mindlock_root_is_honored() {
+        let (base, private, family) = make_test_dirs();
+        let custom_ml = base.join("mindlock-custom");
+        fs::create_dir_all(custom_ml.join("in")).expect("custom mindlock/in");
+        let roots = super::ContextRoots::new(&base, &private, &family).expect("roots");
+        let policy = GatePolicy::new(roots, vec![]).with_mindlock_dir(custom_ml.clone());
+
+        // Write to custom mindlock root -> allow
+        let allowed = policy.check_ingress_integrity(
+            IntegrityTier::Untrusted,
+            &Action::WriteFile {
+                path: custom_ml.join("in/file.txt"),
+                content: "ok".to_string(),
+            },
+        );
+        assert!(allowed.is_allowed(), "custom mindlock root must be honored");
+
+        // Write to some other path that looks like default mindlock -> deny (not configured)
+        let other = base.join("mindlock-wrong/in/file.txt");
+        let denied = policy.check_ingress_integrity(
+            IntegrityTier::Untrusted,
+            &Action::WriteFile {
+                path: other,
+                content: "x".to_string(),
+            },
+        );
+        // Should deny because it's not under the configured mindlock, and parent doesn't exist
+        assert!(!denied.is_allowed(), "non-configured mindlock path must deny");
     }
 
     #[test]

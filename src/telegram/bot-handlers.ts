@@ -383,7 +383,9 @@ function formatMindlockPendingMessage(result: VeriCoreMindlockPendingResult): st
   const lines = result.items.slice(0, 10).flatMap((item, index) => {
     const target = item.target_path ? ` -> ${item.target_path}` : "";
     const main = `${index + 1}. id=${item.id}${target} (${item.size_bytes} bytes)`;
-    if (item.reviewer_assessment?.verdict && item.reviewer_assessment?.reason) {
+    if (item.reviewer_assessment?.status === "pending") {
+      return [main, `   \u{1F50D} Reviewer: pending`];
+    } else if (item.reviewer_assessment?.verdict && item.reviewer_assessment?.reason) {
       return [main, `   \u{1F50D} Reviewer: ${item.reviewer_assessment.verdict} \u2014 ${item.reviewer_assessment.reason}`];
     }
     return [main];
@@ -439,7 +441,9 @@ function formatMindlockListMessage(result: VeriCoreMindlockListResult): string {
   const lines = result.items.slice(0, 20).flatMap((item, index) => {
     const target = item.target_path ? ` -> ${item.target_path}` : "";
     const main = `${index + 1}. id=${item.id}${target} (${item.size_bytes} bytes)`;
-    if (item.reviewer_assessment?.verdict && item.reviewer_assessment?.reason) {
+    if (item.reviewer_assessment?.status === "pending") {
+      return [main, `   \u{1F50D} Reviewer: pending`];
+    } else if (item.reviewer_assessment?.verdict && item.reviewer_assessment?.reason) {
       return [main, `   \u{1F50D} Reviewer: ${item.reviewer_assessment.verdict} \u2014 ${item.reviewer_assessment.reason}`];
     }
     return [main];
@@ -823,6 +827,41 @@ export const registerTelegramHandlers = ({
     if (!stimulusInput.content.trim()) {
       await params.onFallback();
       return;
+    }
+
+    // Fast-path: /models -- show provider picker directly without LLM turn.
+    {
+      const text = (params.msg.text ?? params.msg.caption ?? "").trim();
+      if (/^\/models(?:\s|$|@)/i.test(text)) {
+        try {
+          const modelData = await buildModelsProviderData(cfg);
+          const { byProvider, providers } = modelData;
+          if (providers.length === 0) {
+            await sendVeriCoreDriverResponse(params.msg, "No model providers available.");
+            return;
+          }
+          const providerInfos: ProviderInfo[] = providers.map((p) => ({
+            id: p,
+            count: byProvider.get(p)?.size ?? 0,
+          }));
+          const buttons = buildProviderKeyboard(providerInfos);
+          const keyboard = buildInlineKeyboard(buttons);
+          const messageThreadId = (params.msg as { message_thread_id?: number }).message_thread_id;
+          await withTelegramApiErrorLogging({
+            operation: "sendMessage",
+            runtime,
+            fn: () =>
+              bot.api.sendMessage(params.msg.chat.id, "Select a provider:", {
+                ...(typeof messageThreadId === "number" ? { message_thread_id: messageThreadId } : {}),
+                ...(keyboard ? { reply_markup: keyboard } : {}),
+              }),
+          });
+        } catch (err) {
+          runtime.error?.(warn(`/models fast-path error: ${String(err)}`));
+          await sendVeriCoreDriverResponse(params.msg, "Failed to load models.");
+        }
+        return;
+      }
     }
 
     let route;

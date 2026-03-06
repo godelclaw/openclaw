@@ -1,3 +1,4 @@
+use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -499,6 +500,23 @@ async fn self_escalate_artifact(
             let pending_for_review = pending.clone();
             let source_description = source_path.display().to_string();
             let reason_for_review = reason.to_string();
+
+            // Write initial pending reviewer state so /review shows status immediately.
+            {
+                let meta_path = pending.with_extension("meta.json");
+                if let Ok(raw) = tokio::fs::read(&meta_path).await {
+                    if let Ok(mut meta) = serde_json::from_slice::<Value>(&raw) {
+                        meta["reviewer_assessment"] = json!({
+                            "status": "pending",
+                            "source": "manual"
+                        });
+                        if let Ok(updated) = serde_json::to_string_pretty(&meta) {
+                            let _ = tokio::fs::write(&meta_path, updated.as_bytes()).await;
+                        }
+                    }
+                }
+            }
+
             tokio::spawn(async move {
                 reviewer
                     .auto_review_for_pending(
@@ -585,10 +603,9 @@ fn validate_mindlock_housekeeping_command(command: &str, mindlock_root: &Path) -
         return None;
     }
 
-    let mindlock_root_str = mindlock_root.to_str().unwrap_or("/home/zarclaw/mindlock");
     let touches_mindlock = path_tokens
         .iter()
-        .any(|token| token.starts_with(mindlock_root_str));
+        .any(|token| Path::new(token).starts_with(mindlock_root));
     if !touches_mindlock {
         return None;
     }

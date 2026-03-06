@@ -317,5 +317,7 @@ fn default_max_precedent_items() -> usize {
 }
 
 fn default_mindlock_dir() -> PathBuf {
-    PathBuf::from("/home/zarclaw/mindlock")
+    std::env::var("HOME")
+        .map(|h| PathBuf::from(h).join("mindlock"))
+        .unwrap_or_else(|_| PathBuf::from("/tmp/mindlock"))
 }
