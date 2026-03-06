@@ -47,6 +47,7 @@ pub enum MemoryType {
     Relationship,
     Event,
     ExplicitRemember,
+    SecurityPrecedent,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -154,12 +155,13 @@ impl MemoryCortex {
         let id = self.next_id;
         self.next_id += 1;
 
+        let normalized_summary = normalize_summary_text(&input.summary);
         let normalized_categories = normalize_categories(input.categories);
         let item = MemoryItem {
             id,
             tier: input.tier,
             memory_type: input.memory_type,
-            summary: input.summary.trim().to_string(),
+            summary: normalized_summary,
             categories: normalized_categories.clone(),
             source_session: input.source_session,
             source_date: None,
@@ -247,6 +249,34 @@ impl MemoryCortex {
         item.tier = new_tier;
         item.updated_at = now_ts();
         Ok(true)
+    }
+
+    pub fn remove(&mut self, id: MemoryId) -> bool {
+        if self.items.remove(&id).is_some() {
+            self.rebuild_indexes();
+            true
+        } else {
+            false
+        }
+    }
+
+    #[must_use]
+    pub fn count_by_type(&self, t: &MemoryType) -> usize {
+        self.items.values().filter(|item| &item.memory_type == t).count()
+    }
+
+    pub fn prune_oldest_by_type(&mut self, t: &MemoryType, count: usize) {
+        let mut candidates: Vec<(MemoryId, i64)> = self
+            .items
+            .values()
+            .filter(|item| &item.memory_type == t)
+            .map(|item| (item.id, item.created_at))
+            .collect();
+        candidates.sort_by_key(|&(_, ts)| ts);
+        for (id, _) in candidates.into_iter().take(count) {
+            self.items.remove(&id);
+        }
+        self.rebuild_indexes();
     }
 
     #[must_use]
@@ -524,6 +554,9 @@ impl MemoryCortex {
         ts: i64,
         reinforce_on_duplicate: bool,
     ) -> (MemoryId, bool) {
+        let mut input = input;
+        input.summary = normalize_summary_text(&input.summary);
+
         if let Some(existing_id) = self.find_duplicate_candidate(&input) {
             if reinforce_on_duplicate {
                 if let Some(existing) = self.items.get_mut(&existing_id) {
@@ -672,6 +705,10 @@ fn normalize_summary_for_dedupe(text: &str) -> String {
     let mut tokens: Vec<_> = tokenize(text).into_iter().collect();
     tokens.sort();
     tokens.join(" ")
+}
+
+fn normalize_summary_text(text: &str) -> String {
+    text.trim().to_string()
 }
 
 fn jaccard_similarity(a: &HashSet<String>, b: &HashSet<String>) -> f32 {
@@ -920,5 +957,138 @@ mod tests {
 
         let public_hits = cortex.search("artifact", MemoryTier::Public, 10);
         assert!(public_hits.is_empty());
+    }
+
+    #[test]
+    fn remove_deletes_item_and_rebuilds_indexes() {
+        let mut cortex = MemoryCortex::new();
+        let id = cortex.remember_at(
+            CreateMemoryInput {
+                tier: MemoryTier::Private,
+                memory_type: MemoryType::SecurityPrecedent,
+                summary: "Mindlock crossing allowed: safe text note".to_string(),
+                categories: vec!["security".to_string()],
+                source_session: None,
+            },
+            100,
+        );
+
+        assert!(cortex.get(id).is_some());
+        assert!(cortex.remove(id));
+        assert!(cortex.get(id).is_none());
+        assert!(!cortex.remove(id));
+    }
+
+    #[test]
+    fn count_by_type_returns_correct_count() {
+        let mut cortex = MemoryCortex::new();
+        assert_eq!(cortex.count_by_type(&MemoryType::SecurityPrecedent), 0);
+
+        cortex.remember_at(
+            CreateMemoryInput {
+                tier: MemoryTier::Private,
+                memory_type: MemoryType::SecurityPrecedent,
+                summary: "Precedent 1".to_string(),
+                categories: vec!["security".to_string()],
+                source_session: None,
+            },
+            100,
+        );
+        cortex.remember_at(
+            CreateMemoryInput {
+                tier: MemoryTier::Private,
+                memory_type: MemoryType::SecurityPrecedent,
+                summary: "Precedent 2".to_string(),
+                categories: vec!["security".to_string()],
+                source_session: None,
+            },
+            101,
+        );
+
+        assert_eq!(cortex.count_by_type(&MemoryType::SecurityPrecedent), 2);
+        assert_eq!(cortex.count_by_type(&MemoryType::Fact), 0);
+    }
+
+    #[test]
+    fn prune_oldest_by_type_removes_oldest_first() {
+        let mut cortex = MemoryCortex::new();
+        let _a = cortex.remember_at(
+            CreateMemoryInput {
+                tier: MemoryTier::Private,
+                memory_type: MemoryType::SecurityPrecedent,
+                summary: "Old precedent".to_string(),
+                categories: vec!["security".to_string()],
+                source_session: None,
+            },
+            100,
+        );
+        let b = cortex.remember_at(
+            CreateMemoryInput {
+                tier: MemoryTier::Private,
+                memory_type: MemoryType::SecurityPrecedent,
+                summary: "New precedent".to_string(),
+                categories: vec!["security".to_string()],
+                source_session: None,
+            },
+            200,
+        );
+        // Add a non-precedent to ensure it's not pruned
+        let c = cortex.remember_at(
+            CreateMemoryInput {
+                tier: MemoryTier::Private,
+                memory_type: MemoryType::Fact,
+                summary: "A regular fact".to_string(),
+                categories: vec!["test".to_string()],
+                source_session: None,
+            },
+            50,
+        );
+
+        cortex.prune_oldest_by_type(&MemoryType::SecurityPrecedent, 1);
+
+        assert_eq!(cortex.count_by_type(&MemoryType::SecurityPrecedent), 1);
+        assert!(cortex.get(b).is_some()); // newer kept
+        assert!(cortex.get(c).is_some()); // non-precedent kept
+    }
+
+    #[test]
+    fn security_precedent_serializes_correctly() {
+        let mut cortex = MemoryCortex::new();
+        cortex.remember_at(
+            CreateMemoryInput {
+                tier: MemoryTier::Private,
+                memory_type: MemoryType::SecurityPrecedent,
+                summary: "Test precedent".to_string(),
+                categories: vec!["security".to_string()],
+                source_session: None,
+            },
+            100,
+        );
+
+        let tmp = std::env::temp_dir().join("adclaw-precedent-test.json");
+        cortex.save_json(&tmp).expect("save should work");
+        let loaded = MemoryCortex::load_json(&tmp).expect("load should work");
+        let _ = std::fs::remove_file(&tmp);
+
+        assert_eq!(loaded.count_by_type(&MemoryType::SecurityPrecedent), 1);
+    }
+
+    #[test]
+    fn remember_preserves_long_summaries_without_truncation() {
+        let mut cortex = MemoryCortex::new();
+        let long_summary = "x".repeat(1025);
+        let id = cortex.remember_at(
+            CreateMemoryInput {
+                tier: MemoryTier::Private,
+                memory_type: MemoryType::Fact,
+                summary: long_summary.clone(),
+                categories: vec!["test".to_string()],
+                source_session: None,
+            },
+            1,
+        );
+
+        let item = cortex.get(id).expect("item should exist");
+        assert_eq!(item.summary, long_summary);
     }
 }

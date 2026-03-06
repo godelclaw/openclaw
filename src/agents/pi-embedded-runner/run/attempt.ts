@@ -95,9 +95,9 @@ import { detectAndLoadPromptImages } from "./images.js";
 
 export function injectHistoryImagesIntoMessages(
   messages: AgentMessage[],
-  historyImagesByIndex: Map<number, ImageContent[]>,
+  historyImagesByIndex?: Map<number, ImageContent[]> | null,
 ): boolean {
-  if (historyImagesByIndex.size === 0) {
+  if (!(historyImagesByIndex instanceof Map) || historyImagesByIndex.size === 0) {
     return false;
   }
   let didMutate = false;
@@ -814,27 +814,34 @@ export async function runEmbeddedAttempt(
             workspaceDir: effectiveWorkspace,
             model: params.model,
             existingImages: params.images,
-            historyMessages: activeSession.messages,
             maxBytes: MAX_IMAGE_BYTES,
             // Enforce sandbox path restrictions when sandbox is enabled
-            sandboxRoot: sandbox?.enabled ? sandbox.workspaceDir : undefined,
+            sandbox:
+              sandbox?.enabled && sandbox.fsBridge
+                ? { root: sandbox.workspaceDir, bridge: sandbox.fsBridge }
+                : undefined,
           });
 
           // Inject history images into their original message positions.
           // This ensures the model sees images in context (e.g., "compare to the first image").
+          const historyImagesByIndex = (imageResult as {
+            historyImagesByIndex?: Map<number, ImageContent[]>;
+          }).historyImagesByIndex;
           const didMutate = injectHistoryImagesIntoMessages(
             activeSession.messages,
-            imageResult.historyImagesByIndex,
+            historyImagesByIndex,
           );
           if (didMutate) {
             // Persist message mutations (e.g., injected history images) so we don't re-scan/reload.
             activeSession.agent.replaceMessages(activeSession.messages);
           }
 
+          const historyImageCount =
+            historyImagesByIndex instanceof Map ? historyImagesByIndex.size : 0;
           cacheTrace?.recordStage("prompt:images", {
             prompt: effectivePrompt,
             messages: activeSession.messages,
-            note: `images: prompt=${imageResult.images.length} history=${imageResult.historyImagesByIndex.size}`,
+            note: `images: prompt=${imageResult.images.length} history=${historyImageCount}`,
           });
 
           // Only pass images option if there are actually images to pass

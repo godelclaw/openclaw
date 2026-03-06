@@ -42,6 +42,12 @@ export type VeriCoreTurnOutcome = {
   tools_used: string[];
   prompt_tokens: number;
   completion_tokens: number;
+  security_hold?: {
+    gate: string;
+    reason: string;
+    held_content: string;
+    mindlock_path?: string | null;
+  } | null;
 };
 
 export type VeriCoreRunResult = {
@@ -108,6 +114,60 @@ export type VeriCoreMemorySetTierResult = {
   tier: string;
   changed: boolean;
   operator_approved: boolean;
+};
+
+export type VeriCoreMindlockPendingItem = {
+  id: string;
+  name: string;
+  path: string;
+  size_bytes: number;
+  modified_ts: number;
+  target_path?: string | null;
+  reason?: string | null;
+  reviewer_assessment?: {
+    verdict: string;
+    reason: string;
+    reviewed_at?: number;
+  } | null;
+};
+
+export type VeriCoreMindlockPendingResult = {
+  mindlock_dir: string;
+  pending_dir: string;
+  count: number;
+  items: VeriCoreMindlockPendingItem[];
+  as_of_ts?: number;
+};
+
+export type VeriCoreMindlockStatusResult = {
+  mindlock_dir: string;
+  counts: {
+    in: number;
+    out: number;
+    pending: number;
+    rejected: number;
+  };
+  as_of_ts?: number;
+};
+
+export type VeriCoreMindlockListResult = {
+  mindlock_dir: string;
+  box: "in" | "out" | "pending" | "rejected";
+  dir: string;
+  count: number;
+  items: VeriCoreMindlockPendingItem[];
+  as_of_ts?: number;
+};
+
+export type VeriCoreMindlockDecisionResult = {
+  id: string;
+  status: "approved" | "rejected";
+  source: string;
+  target?: string;
+  archived_artifact?: string;
+  archived_meta?: string | null;
+  rejected_artifact?: string;
+  rejected_meta?: string | null;
 };
 
 type VeriCoreSocketResponse<T> = {
@@ -247,7 +307,20 @@ export function buildVeriCoreStimulusInput(ctx: FinalizedMsgContext): VeriCoreSt
 }
 
 async function runVeriCoreSocketMethod<T>(
-  method: "health" | "decide" | "route" | "run" | "memory_status" | "memory_query" | "memory_refine" | "memory_set_tier",
+  method:
+    | "health"
+    | "decide"
+    | "route"
+    | "run"
+    | "memory_status"
+    | "memory_query"
+    | "memory_refine"
+    | "memory_set_tier"
+    | "mindlock_pending"
+    | "mindlock_status"
+    | "mindlock_list"
+    | "mindlock_approve"
+    | "mindlock_reject",
   stimulus: VeriCoreStimulusInput | undefined,
   query: string | undefined,
   embed: boolean | undefined,
@@ -256,7 +329,7 @@ async function runVeriCoreSocketMethod<T>(
 ): Promise<T> {
   const socketPath = options.socketPath ?? resolveVeriCoreSocketPath();
   const timeoutMs = options.timeoutMs ?? DEFAULT_DECIDE_TIMEOUT_MS;
-  const requestPayload = JSON.stringify({ method, stimulus, query, embed, ...(extraPayload ?? {}) });
+  const requestPayload = JSON.stringify({ method, stimulus, query, embed, ...extraPayload });
 
   return await new Promise<T>((resolve, reject) => {
     const socket = createConnection({ path: socketPath });
@@ -642,6 +715,114 @@ export async function runVeriCoreMemorySetTier(
       memory_id: memoryId,
       tier,
       operator_approved: operatorApproved,
+    },
+  );
+}
+
+export async function runVeriCoreMindlockStatus(
+  stimulus: VeriCoreStimulusInput,
+  options: VeriCoreBridgeOptions = {},
+): Promise<VeriCoreMindlockStatusResult> {
+  const statusOptions = {
+    ...options,
+    timeoutMs: options.timeoutMs ?? DEFAULT_DECIDE_TIMEOUT_MS,
+  };
+
+  return await runVeriCoreSocketMethod<VeriCoreMindlockStatusResult>(
+    "mindlock_status",
+    stimulus,
+    undefined,
+    undefined,
+    statusOptions,
+  );
+}
+
+export async function runVeriCoreMindlockList(
+  box: "in" | "out" | "pending" | "rejected",
+  stimulus: VeriCoreStimulusInput,
+  limit?: number,
+  options: VeriCoreBridgeOptions = {},
+): Promise<VeriCoreMindlockListResult> {
+  const listOptions = {
+    ...options,
+    timeoutMs: options.timeoutMs ?? DEFAULT_DECIDE_TIMEOUT_MS,
+  };
+
+  return await runVeriCoreSocketMethod<VeriCoreMindlockListResult>(
+    "mindlock_list",
+    stimulus,
+    undefined,
+    undefined,
+    listOptions,
+    {
+      stage: box,
+      limit,
+    },
+  );
+}
+
+export async function runVeriCoreMindlockPending(
+  stimulus: VeriCoreStimulusInput,
+  options: VeriCoreBridgeOptions = {},
+): Promise<VeriCoreMindlockPendingResult> {
+  const pendingOptions = {
+    ...options,
+    timeoutMs: options.timeoutMs ?? DEFAULT_DECIDE_TIMEOUT_MS,
+  };
+
+  return await runVeriCoreSocketMethod<VeriCoreMindlockPendingResult>(
+    "mindlock_pending",
+    stimulus,
+    undefined,
+    undefined,
+    pendingOptions,
+  );
+}
+
+export async function runVeriCoreMindlockApprove(
+  artifactId: string,
+  stimulus: VeriCoreStimulusInput,
+  reason?: string,
+  options: VeriCoreBridgeOptions = {},
+): Promise<VeriCoreMindlockDecisionResult> {
+  const approveOptions = {
+    ...options,
+    timeoutMs: options.timeoutMs ?? DEFAULT_DECIDE_TIMEOUT_MS,
+  };
+
+  return await runVeriCoreSocketMethod<VeriCoreMindlockDecisionResult>(
+    "mindlock_approve",
+    stimulus,
+    undefined,
+    undefined,
+    approveOptions,
+    {
+      artifact_id: artifactId,
+      reason,
+    },
+  );
+}
+
+export async function runVeriCoreMindlockReject(
+  artifactId: string,
+  stimulus: VeriCoreStimulusInput,
+  reason?: string,
+  options: VeriCoreBridgeOptions = {},
+): Promise<VeriCoreMindlockDecisionResult> {
+  const rejectOptions = {
+    ...options,
+    timeoutMs: options.timeoutMs ?? DEFAULT_DECIDE_TIMEOUT_MS,
+  };
+
+  return await runVeriCoreSocketMethod<VeriCoreMindlockDecisionResult>(
+    "mindlock_reject",
+    stimulus,
+    undefined,
+    undefined,
+    rejectOptions,
+    {
+      artifact_id: artifactId,
+      reason,
     },
   );
 }

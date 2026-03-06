@@ -5,19 +5,14 @@
 home_root = "/home/zarclaw"
 private = "/home/zarclaw/private"
 family = "/home/zarclaw/family"
-private_prefixes = ["/home/zarclaw/shared", "/home/zarclaw/memory"]
+private_prefixes = ["/home/zarclaw/shared", "/home/zarclaw/memory", "/home/zarclaw/mindlock"]
 family_prefixes = []
 public_prefixes = ["/home/zarclaw/public", "/home/zarclaw/repos", "/home/zarclaw/governance-reasoning-engine", "/home/zarclaw/mettaclaw", "/home/zarclaw/hyperon", "/home/zarclaw/mettapedia", "/home/zarclaw/godelclaw-arch", "/home/zarclaw/bounty_work", "/home/zarclaw/gmp-6.3.0"]
 dot_paths_private = true
 default_private = true
 
 [network]
-allowlist = [
-  "openrouter.ai",
-  "api.anthropic.com",
-  "mcp.tavily.com",
-  "www.moltbook.com",
-]
+allowlist = []  # empty = open external web (local/private hosts blocked by SSRF guard)
 
 [exec]
 allow_in_private = true
@@ -85,9 +80,6 @@ private = ["*"]
 # Trusted wall-clock schedule: uses system time + utc_offset.
 utc_offset = 1
 
-[schedule.public]
-allowed_start_hour = 7
-allowed_end_hour = 23
 
 [llm]
 model = "anthropic/claude-sonnet-4.6"
@@ -98,12 +90,23 @@ temperature = 0.7
 timeout_secs = 120
 
 [turn]
-max_iterations = 20
-gas_budget = 200
-exec_timeout_secs = 60
-max_tool_calls = 64
+max_iterations = 0
+gas_budget = 0
+exec_timeout_secs = 120
+max_tool_calls = 0
 finalize_without_tools_on_limit = true
 history_messages_max = 40
 
 [system_prompt]
 file = "/home/zarclaw/repos/godelclaw/.BGIseed-state/workspace/SOUL.md"
+
+
+[security_review]
+enabled = true
+egress_prompt_file = "/home/zarclaw/private/mind/security/egress-review.md"
+ingress_prompt_file = "/home/zarclaw/private/mind/security/ingress-review.md"
+reviewer_context_file = "/home/zarclaw/private/mind/security/reviewer-context.md"
+max_revision_attempts = 1
+max_precedent_items = 50
+mindlock_dir = "/home/zarclaw/mindlock"
+trusted_write_prefixes = ["/home/zarclaw/repos", "/home/zarclaw/governance-reasoning-engine", "/home/zarclaw/mettaclaw"]

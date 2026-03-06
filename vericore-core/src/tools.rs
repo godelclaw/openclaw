@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::llm::ToolCall;
 use crate::policy::GatePolicy;
@@ -15,6 +15,7 @@ use crate::types::{Action, ContextTier};
 pub fn tool_definitions_for_context(
     policy: &GatePolicy,
     context: ContextTier,
+    mindlock_dir: &Path,
 ) -> Vec<serde_json::Value> {
     let mut defs = Vec::new();
 
@@ -103,6 +104,50 @@ pub fn tool_definitions_for_context(
             }),
         ));
     }
+    if should_offer("promote_from_mindlock", "write_file") && context == ContextTier::Private {
+        defs.push(make_tool(
+            "promote_from_mindlock",
+            &format!("Promote a staged file from {0}/in or {0}/out to a target path.", mindlock_dir.display()),
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "source_path": { "type": "string", "description": format!("Absolute path under {0}/in or {0}/out", mindlock_dir.display()) },
+                    "target_path": { "type": "string", "description": "Absolute destination path" }
+                },
+                "required": ["source_path", "target_path"]
+            }),
+        ));
+    }
+
+    if should_offer("request_review", "write_file") && context == ContextTier::Private {
+        defs.push(make_tool(
+            "request_review",
+            &format!("Request security review for a {} artifact crossing before promotion.", mindlock_dir.display()),
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "source_path": { "type": "string", "description": format!("Absolute path under {0}/in, {0}/out, or {0}/work", mindlock_dir.display()) },
+                    "target_path": { "type": "string", "description": "Absolute intended destination path" }
+                },
+                "required": ["source_path", "target_path"]
+            }),
+        ));
+    }
+
+    if should_offer("self_escalate", "write_file") && context == ContextTier::Private {
+        defs.push(make_tool(
+            "self_escalate",
+            "Move a mindlock artifact to pending-zar for human approval.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "source_path": { "type": "string", "description": format!("Absolute path under {0}/in, {0}/out, or {0}/work", mindlock_dir.display()) },
+                    "reason": { "type": "string", "description": "Short reason for escalation" }
+                },
+                "required": ["source_path"]
+            }),
+        ));
+    }
 
     defs
 }
@@ -144,6 +189,32 @@ pub fn parse_tool_call(call: &ToolCall) -> Action {
             let url = call.arguments["url"].as_str().unwrap_or("");
             let (host, path) = parse_url_parts(url);
             Action::WebFetch { host, path }
+        }
+        "promote_from_mindlock" => {
+            let source_path = call.arguments["source_path"].as_str().unwrap_or("");
+            let target_path = call.arguments["target_path"].as_str().unwrap_or("");
+            Action::PromoteFromMindlock {
+                source_path: PathBuf::from(source_path),
+                target_path: PathBuf::from(target_path),
+            }
+        }
+        "request_review" => {
+            let source_path = call.arguments["source_path"].as_str().unwrap_or("");
+            let target_path = call.arguments["target_path"].as_str().unwrap_or("");
+            Action::RequestReview {
+                source_path: PathBuf::from(source_path),
+                target_path: PathBuf::from(target_path),
+            }
+        }
+        "self_escalate" => {
+            let source_path = call.arguments["source_path"].as_str().unwrap_or("");
+            let reason = call.arguments["reason"]
+                .as_str()
+                .unwrap_or("self escalation requested");
+            Action::SelfEscalate {
+                source_path: PathBuf::from(source_path),
+                reason: reason.to_string(),
+            }
         }
         _ => Action::NoOp {
             reason: format!("unknown tool: {}", call.name),
@@ -273,7 +344,7 @@ mod tests {
         );
 
         // Public should only get read_file and list_dir (both gate as read_file action kind)
-        let public_tools = tool_definitions_for_context(&policy, ContextTier::Public);
+        let public_tools = tool_definitions_for_context(&policy, ContextTier::Public, Path::new("/home/zarclaw/mindlock"));
         let public_names: Vec<&str> = public_tools
             .iter()
             .map(|t| t["function"]["name"].as_str().unwrap())
@@ -286,7 +357,7 @@ mod tests {
 
         // Private should get everything (exec allowed via with_exec_in_private)
         let policy = policy.with_exec_in_private(true);
-        let private_tools = tool_definitions_for_context(&policy, ContextTier::Private);
+        let private_tools = tool_definitions_for_context(&policy, ContextTier::Private, Path::new("/home/zarclaw/mindlock"));
         let private_names: Vec<&str> = private_tools
             .iter()
             .map(|t| t["function"]["name"].as_str().unwrap())
@@ -295,6 +366,30 @@ mod tests {
         assert!(private_names.contains(&"write_file"));
         assert!(private_names.contains(&"exec"));
         assert!(private_names.contains(&"web_fetch"));
+    }
+
+    #[test]
+    fn private_tools_include_boundary_review_tools() {
+        use crate::policy::ContextRoots;
+        use std::fs;
+
+        let id = format!("vericore-tools-boundary-test-{}", std::process::id());
+        let base = std::env::temp_dir().join(id);
+        fs::create_dir_all(base.join("private")).unwrap();
+        fs::create_dir_all(base.join("family")).unwrap();
+
+        let roots = ContextRoots::new(&base, base.join("private"), base.join("family")).unwrap();
+        let policy = GatePolicy::new(roots, vec![]).with_exec_in_private(true);
+
+        let private_tools = tool_definitions_for_context(&policy, ContextTier::Private, Path::new("/home/zarclaw/mindlock"));
+        let private_names: Vec<&str> = private_tools
+            .iter()
+            .map(|t| t["function"]["name"].as_str().unwrap())
+            .collect();
+
+        assert!(private_names.contains(&"request_review"));
+        assert!(private_names.contains(&"self_escalate"));
+        assert!(private_names.contains(&"promote_from_mindlock"));
     }
 
     #[test]
@@ -316,7 +411,7 @@ mod tests {
                 vec!["*".into()],                             // private
             );
 
-        let public_tools = tool_definitions_for_context(&policy, ContextTier::Public);
+        let public_tools = tool_definitions_for_context(&policy, ContextTier::Public, Path::new("/home/zarclaw/mindlock"));
         let public_names: Vec<&str> = public_tools
             .iter()
             .map(|t| t["function"]["name"].as_str().unwrap())

@@ -69,6 +69,7 @@ export const TelegramGroupSchema = z
   .object({
     requireMention: z.boolean().optional(),
     groupPolicy: GroupPolicySchema.optional(),
+    minReplyIntervalSeconds: z.number().int().min(0).max(3600).optional(),
     tools: ToolPolicySchema,
     toolsBySender: ToolPolicyBySenderSchema,
     skills: z.array(z.string()).optional(),

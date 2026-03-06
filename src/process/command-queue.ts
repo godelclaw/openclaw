@@ -124,8 +124,10 @@ function drainLane(lane: string) {
             const completedCurrentGeneration = completeTask(state, taskId, taskGeneration);
             const isProbeLane = lane.startsWith("auth-probe:") || lane.startsWith("session:probe-");
             if (!isProbeLane) {
+              const stack =
+                err instanceof Error && err.stack ? ` stack="${err.stack.replace(/\s+/g, " ").trim()}"` : "";
               diag.error(
-                `lane task error: lane=${lane} durationMs=${Date.now() - startTime} error="${String(err)}"`,
+                `lane task error: lane=${lane} durationMs=${Date.now() - startTime} error="${String(err)}"${stack}`,
               );
             }
             if (completedCurrentGeneration) {

@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::LlmConfig;
 
+#[derive(Clone)]
 pub struct LlmClient {
     http: reqwest::Client,
     api_base: String,

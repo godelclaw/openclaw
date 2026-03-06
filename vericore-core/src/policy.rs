@@ -525,6 +525,12 @@ impl GatePolicy {
                 let target_tier = self.roots.tier_for_path(&canonical);
                 let is_private_write = matches!(target_tier, Some(ContextTier::Private));
                 let is_sensitive_config = is_sensitive_config_path(&canonical);
+                let is_mindlock_write = canonical.starts_with("/home/zarclaw/mindlock");
+
+                // Mindlock is quarantine space: untrusted content may be materialized there.
+                if is_mindlock_write {
+                    return Verdict::allow();
+                }
 
                 if (is_private_write || is_sensitive_config) && integrity != IntegrityTier::Trusted
                 {
@@ -769,6 +775,89 @@ impl GatePolicy {
                     ))
                 }
             }
+            Action::PromoteFromMindlock {
+                source_path,
+                target_path,
+            } => {
+                let source = match canonicalize_existing_file(source_path) {
+                    Ok(p) => p,
+                    Err(err) => return Verdict::deny(err),
+                };
+                let in_root = Path::new("/home/zarclaw/mindlock/in");
+                let out_root = Path::new("/home/zarclaw/mindlock/out");
+                if !source.starts_with(in_root) && !source.starts_with(out_root) {
+                    return Verdict::deny(format!(
+                        "promote source must be under /home/zarclaw/mindlock/in or /home/zarclaw/mindlock/out: {}",
+                        source.display()
+                    ));
+                }
+                let target = match canonicalize_write_target(target_path) {
+                    Ok(p) => p,
+                    Err(err) => return Verdict::deny(err),
+                };
+                let Some(target_tier) = self.roots.tier_for_path(&target) else {
+                    return Verdict::deny(format!(
+                        "target path outside home: {}",
+                        target.display()
+                    ));
+                };
+                if context.can_write(target_tier) {
+                    Verdict::allow()
+                } else {
+                    Verdict::deny(format!(
+                        "promote denied for {:?} to {:?} file: {}",
+                        context,
+                        target_tier,
+                        target.display()
+                    ))
+                }
+            }
+            Action::RequestReview {
+                source_path,
+                target_path,
+            } => {
+                if context != ContextTier::Private {
+                    return Verdict::deny("request_review requires private context");
+                }
+                let source = match canonicalize_existing_file(source_path) {
+                    Ok(p) => p,
+                    Err(err) => return Verdict::deny(err),
+                };
+                if !is_mindlock_stage_path(&source) {
+                    return Verdict::deny(format!(
+                        "request_review source must be under /home/zarclaw/mindlock/in, /home/zarclaw/mindlock/out, or /home/zarclaw/mindlock/work: {}",
+                        source.display()
+                    ));
+                }
+                let target = match canonicalize_write_target(target_path) {
+                    Ok(p) => p,
+                    Err(err) => return Verdict::deny(err),
+                };
+                if self.roots.tier_for_path(&target).is_none() {
+                    return Verdict::deny(format!(
+                        "target path outside home: {}",
+                        target.display()
+                    ));
+                }
+                Verdict::allow()
+            }
+            Action::SelfEscalate { source_path, .. } => {
+                if context != ContextTier::Private {
+                    return Verdict::deny("self_escalate requires private context");
+                }
+                let source = match canonicalize_existing_file(source_path) {
+                    Ok(p) => p,
+                    Err(err) => return Verdict::deny(err),
+                };
+                if is_mindlock_stage_path(&source) {
+                    Verdict::allow()
+                } else {
+                    Verdict::deny(format!(
+                        "self_escalate source must be under /home/zarclaw/mindlock/in, /home/zarclaw/mindlock/out, or /home/zarclaw/mindlock/work: {}",
+                        source.display()
+                    ))
+                }
+            }
             Action::ToolAction { .. } => {
                 Verdict::deny("internal error: unflattened ToolAction reached primitive gate")
             }
@@ -797,6 +886,17 @@ impl GatePolicy {
                 .ok()
                 .and_then(|p| self.roots.tier_for_path(&p))
                 .unwrap_or(context),
+            Action::PromoteFromMindlock { target_path, .. } => {
+                canonicalize_write_target(target_path)
+                    .ok()
+                    .and_then(|p| self.roots.tier_for_path(&p))
+                    .unwrap_or(context)
+            }
+            Action::RequestReview { target_path, .. } => canonicalize_write_target(target_path)
+                .ok()
+                .and_then(|p| self.roots.tier_for_path(&p))
+                .unwrap_or(context),
+            Action::SelfEscalate { .. } => ContextTier::Private,
             Action::Exec { .. } => context,
             Action::WebFetch { .. } => ContextTier::Public,
             Action::Respond { .. } | Action::NoOp { .. } | Action::ToolAction { .. } => {
@@ -807,10 +907,16 @@ impl GatePolicy {
 
     fn host_allowed(&self, host: &str) -> bool {
         let host = normalize_host(host);
-        self.network_allowlist.iter().any(|allowed| {
-            let allowed = normalize_host(allowed);
-            host == allowed || host.ends_with(&format!(".{allowed}"))
-        })
+        if self.network_allowlist.is_empty() {
+            // Open policy: allow all external hosts, block local/private (SSRF guard)
+            !is_local_or_private_host(&host)
+        } else {
+            // Allowlist policy: only listed hosts pass
+            self.network_allowlist.iter().any(|allowed| {
+                let allowed = normalize_host(allowed);
+                host == allowed || host.ends_with(&format!(".{allowed}"))
+            })
+        }
     }
 }
 
@@ -854,6 +960,12 @@ fn list_with_fallback(primary: &Option<StringList>, fallback: &Option<StringList
 fn list_allows(list: &[String], value: &str) -> bool {
     list.iter()
         .any(|entry| entry == "*" || entry.eq_ignore_ascii_case(value))
+}
+
+fn is_mindlock_stage_path(path: &Path) -> bool {
+    path.starts_with("/home/zarclaw/mindlock/in")
+        || path.starts_with("/home/zarclaw/mindlock/out")
+        || path.starts_with("/home/zarclaw/mindlock/work")
 }
 
 fn canonicalize_dir(path: &Path) -> Result<PathBuf, String> {
@@ -947,6 +1059,61 @@ fn is_sensitive_config_path(path: &Path) -> bool {
 
 fn normalize_host(host: &str) -> String {
     host.trim().trim_end_matches('.').to_ascii_lowercase()
+}
+
+/// Returns true if the host is local, loopback, link-local, or RFC-1918 private.
+/// Used as an SSRF guard when the network allowlist is empty (open external policy).
+fn is_local_or_private_host(host: &str) -> bool {
+    // Exact local names
+    let local_names = ["localhost", "localhost.localdomain", "broadcasthost"];
+    if local_names.contains(&host) {
+        return true;
+    }
+
+    // Local TLD suffixes
+    let local_suffixes = [".local", ".internal", ".home.arpa", ".localdomain"];
+    for suffix in &local_suffixes {
+        if host.ends_with(suffix) {
+            return true;
+        }
+    }
+
+    // Try IPv4 parsing
+    if let Ok(addr) = host.parse::<std::net::Ipv4Addr>() {
+        let octets = addr.octets();
+        return matches!(
+            octets,
+            // Loopback 127.0.0.0/8
+            [127, ..] |
+            // Link-local 169.254.0.0/16
+            [169, 254, ..] |
+            // RFC-1918: 10.0.0.0/8
+            [10, ..] |
+            // RFC-1918: 192.168.0.0/16
+            [192, 168, ..] |
+            // Unspecified
+            [0, 0, 0, 0]
+        ) || (octets[0] == 172 && octets[1] >= 16 && octets[1] <= 31); // 172.16.0.0/12
+    }
+
+    // Try IPv6 parsing
+    if let Ok(addr) = host.parse::<std::net::Ipv6Addr>() {
+        let segs = addr.segments();
+        // ::1 loopback
+        if addr == std::net::Ipv6Addr::LOCALHOST {
+            return true;
+        }
+        // fe80::/10 link-local
+        if segs[0] & 0xffc0 == 0xfe80 {
+            return true;
+        }
+        // fc00::/7 ULA
+        if segs[0] & 0xfe00 == 0xfc00 {
+            return true;
+        }
+    }
+
+    false
 }
 
 #[cfg(test)]
@@ -1206,6 +1373,23 @@ utc_offset = 0
     }
 
     #[test]
+    fn untrusted_ingress_can_write_into_mindlock() {
+        let (base, private, family) = make_test_dirs();
+        let roots = super::ContextRoots::new(&base, &private, &family).expect("roots");
+        let policy = GatePolicy::new(roots, vec![]);
+
+        let verdict = policy.check_ingress_integrity(
+            IntegrityTier::Untrusted,
+            &Action::WriteFile {
+                path: std::path::PathBuf::from("/home/zarclaw/mindlock/in/artifact.txt"),
+                content: "x".to_string(),
+            },
+        );
+
+        assert!(verdict.is_allowed());
+    }
+
+    #[test]
     fn trusted_ingress_can_write_sensitive_config_path() {
         let (base, private, family) = make_test_dirs();
         let state_dir = base.join(".BGIseed-state");
@@ -1266,5 +1450,69 @@ utc_offset = 0
             .with_public_prefixes(vec![nested])
             .expect_err("must reject overlap");
         assert!(err.contains("overlaps with private root"));
+    }
+
+    // ── host_allowed / SSRF guard tests ──────────────────────────────────────
+
+    fn policy_with_allowlist(hosts: &[&str]) -> super::GatePolicy {
+        let (base, private, family) = make_test_dirs();
+        let roots = super::ContextRoots::new(&base, &private, &family).expect("roots");
+        let allowlist: Vec<String> = hosts.iter().map(|s| s.to_string()).collect();
+        super::GatePolicy::new(roots, allowlist)
+    }
+
+    #[test]
+    fn open_policy_allows_public_hosts() {
+        let policy = policy_with_allowlist(&[]);
+        for host in &["github.com", "docs.rs", "openrouter.ai", "api.example.com"] {
+            assert!(
+                policy.host_allowed(host),
+                "expected {host} to be allowed under open policy"
+            );
+        }
+    }
+
+    #[test]
+    fn open_policy_blocks_local_and_private_hosts() {
+        let policy = policy_with_allowlist(&[]);
+        let blocked = [
+            "localhost",
+            "localhost.localdomain",
+            "127.0.0.1",
+            "127.0.0.2",
+            "10.0.0.5",
+            "192.168.1.8",
+            "172.16.1.2",
+            "172.31.255.255",
+            "169.254.169.254",
+            "0.0.0.0",
+            "::1",
+            "fe80::1",
+            "fc00::1",
+            "internal.local",
+            "myhost.internal",
+        ];
+        for host in &blocked {
+            assert!(
+                !policy.host_allowed(host),
+                "expected {host} to be blocked under open policy (SSRF guard)"
+            );
+        }
+    }
+
+    #[test]
+    fn allowlist_policy_allows_listed_and_subdomains() {
+        let policy = policy_with_allowlist(&["openrouter.ai", "moltbook.com"]);
+        assert!(policy.host_allowed("openrouter.ai"));
+        assert!(policy.host_allowed("api.openrouter.ai"));
+        assert!(policy.host_allowed("moltbook.com"));
+        assert!(policy.host_allowed("www.moltbook.com"));
+    }
+
+    #[test]
+    fn allowlist_policy_blocks_unlisted_external_hosts() {
+        let policy = policy_with_allowlist(&["openrouter.ai"]);
+        assert!(!policy.host_allowed("github.com"));
+        assert!(!policy.host_allowed("docs.rs"));
     }
 }

@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -120,6 +121,18 @@ pub enum Action {
         host: String,
         path: String,
     },
+    PromoteFromMindlock {
+        source_path: PathBuf,
+        target_path: PathBuf,
+    },
+    RequestReview {
+        source_path: PathBuf,
+        target_path: PathBuf,
+    },
+    SelfEscalate {
+        source_path: PathBuf,
+        reason: String,
+    },
     /// Optional identity wrapper to support tool/skill identity gating
     /// while still enforcing primitive action checks.
     ToolAction {
@@ -141,6 +154,9 @@ impl Action {
             Action::ListDir { .. } => "list_dir",
             Action::WriteFile { .. } => "write_file",
             Action::Exec { .. } => "exec",
+            Action::PromoteFromMindlock { .. } => "promote_from_mindlock",
+            Action::RequestReview { .. } => "request_review",
+            Action::SelfEscalate { .. } => "self_escalate",
             Action::WebFetch { .. } => "web_fetch",
             Action::ToolAction { action, .. } => action.kind(),
             Action::NoOp { .. } => "noop",
@@ -168,6 +184,31 @@ impl Action {
             _ => self,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SecurityVerdict {
+    Allow,
+    RequestRevision,
+    RequireZarApproval,
+    Reject,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SecurityReviewDecision {
+    pub verdict: SecurityVerdict,
+    pub reason: String,
+    pub feedback: Option<String>,
+    pub safe_rewrite: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SecurityHold {
+    pub gate: String,
+    pub reason: String,
+    pub held_content: String,
+    pub mindlock_path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

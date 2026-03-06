@@ -52,6 +52,22 @@ function compactSkillPaths(skills: Skill[]): Skill[] {
   }));
 }
 
+const SKILL_PROMPT_DESCRIPTION_MAX_LENGTH = 80;
+
+function compactSkillDescriptions(skills: Skill[]): Skill[] {
+  return skills.map((s) => {
+    const raw = (s.description ?? "").replace(/\s+/g, " " ).trim();
+    if (!raw) return s;
+    const firstSentence = raw.split(/[.!?]\s+/, 1)[0]?.trim() ?? raw;
+    const base = firstSentence.length >= 24 ? firstSentence : raw;
+    const compact =
+      base.length > SKILL_PROMPT_DESCRIPTION_MAX_LENGTH
+        ? base.slice(0, SKILL_PROMPT_DESCRIPTION_MAX_LENGTH - 1).trimEnd() + "…"
+        : base;
+    return { ...s, description: compact };
+  });
+}
+
 function debugSkillCommandOnce(
   messageKey: string,
   message: string,
@@ -509,7 +525,7 @@ function resolveWorkspaceSkillPromptState(
   const prompt = [
     remoteNote,
     truncationNote,
-    formatSkillsForPrompt(compactSkillPaths(skillsForPrompt)),
+    formatSkillsForPrompt(compactSkillPaths(compactSkillDescriptions(skillsForPrompt))),
   ]
     .filter(Boolean)
     .join("\n");

@@ -30,12 +30,21 @@ import {
   runVeriCoreMemoryRefine,
   runVeriCoreMemorySetTier,
   runVeriCoreMemoryStatus,
+  runVeriCoreMindlockApprove,
+  runVeriCoreMindlockList,
+  runVeriCoreMindlockPending,
+  runVeriCoreMindlockReject,
+  runVeriCoreMindlockStatus,
   runVeriCoreStimulusRoute,
   runVeriCoreStimulusRun,
   type VeriCoreMemoryQueryResult,
   type VeriCoreMemoryRefineResult,
   type VeriCoreMemorySetTierResult,
   type VeriCoreMemoryStatus,
+  type VeriCoreMindlockDecisionResult,
+  type VeriCoreMindlockListResult,
+  type VeriCoreMindlockPendingResult,
+  type VeriCoreMindlockStatusResult,
   type VeriCoreRoutePreference,
 } from "../vericore/impetus.js";
 import { withTelegramApiErrorLogging } from "./api-logging.js";
@@ -154,6 +163,89 @@ function isMemoryPromoteCommand(command?: string | null): boolean {
   );
 }
 
+function isMindlockCommand(command?: string | null): boolean {
+  if (!command) {
+    return false;
+  }
+  const normalized = command.trim().toLowerCase();
+  return normalized === "mindlock";
+}
+
+function isMindlockReviewCommand(command?: string | null): boolean {
+  if (!command) {
+    return false;
+  }
+  const normalized = command.trim().toLowerCase();
+  return normalized === "review";
+}
+
+function isMindlockApproveCommand(command?: string | null): boolean {
+  if (!command) {
+    return false;
+  }
+  const normalized = command.trim().toLowerCase();
+  return normalized === "a";
+}
+
+function isMindlockRejectCommand(command?: string | null): boolean {
+  if (!command) {
+    return false;
+  }
+  const normalized = command.trim().toLowerCase();
+  return normalized === "reject" || normalized === "r";
+}
+
+function parseMindlockArtifactArgs(text?: string): {
+  artifactId?: string;
+  reason?: string;
+  error?: string;
+} {
+  const body = parseMemoryQueryText(text);
+  const trimmed = body.trim();
+  if (!trimmed) {
+    return { error: "Missing artifact id." };
+  }
+
+  const firstSpace = trimmed.search(/\s/);
+  if (firstSpace < 0) {
+    return { artifactId: trimmed };
+  }
+
+  const artifactId = trimmed.slice(0, firstSpace).trim();
+  const reason = trimmed.slice(firstSpace + 1).trim();
+  return { artifactId, reason: reason || undefined };
+}
+
+function parseMindlockMenuArgs(text?: string): {
+  box?: "in" | "out" | "pending" | "rejected";
+  limit?: number;
+  error?: string;
+} {
+  const body = parseMemoryQueryText(text).trim();
+  if (!body) {
+    return {};
+  }
+
+  const parts = body.split(/\s+/).filter(Boolean);
+  const first = (parts[0] ?? "").toLowerCase();
+  const normalized = first === "pending-zar" ? "pending" : first;
+
+  if (!["in", "out", "pending", "rejected"].includes(normalized)) {
+    return { error: "Usage: /mindlock [in|out|pending|rejected] [limit]" };
+  }
+
+  let limit: number | undefined;
+  if (parts.length >= 2) {
+    const parsed = Number(parts[1]);
+    if (!Number.isInteger(parsed) || parsed <= 0) {
+      return { error: "Limit must be a positive integer." };
+    }
+    limit = parsed;
+  }
+
+  return { box: normalized as "in" | "out" | "pending" | "rejected", limit };
+}
+
 function normalizeMemoryTierToken(raw: string): "public" | "family" | "private" | "top_secret" | undefined {
   const normalized = raw.trim().toLowerCase();
   if (normalized === "public") {
@@ -268,6 +360,109 @@ function formatMemoryRefineMessage(result: VeriCoreMemoryRefineResult): string {
   ].join("\n");
 }
 
+function formatMindlockPendingMessage(result: VeriCoreMindlockPendingResult): string {
+  if (!result.items.length) {
+    return "Mindlock pending review queue is empty.";
+  }
+
+  const lines = result.items.slice(0, 10).flatMap((item, index) => {
+    const target = item.target_path ? ` -> ${item.target_path}` : "";
+    const main = `${index + 1}. id=${item.id}${target} (${item.size_bytes} bytes)`;
+    if (item.reviewer_assessment?.verdict && item.reviewer_assessment?.reason) {
+      return [main, `   \u{1F50D} Reviewer: ${item.reviewer_assessment.verdict} \u2014 ${item.reviewer_assessment.reason}`];
+    }
+    return [main];
+  });
+
+  const more = result.items.length > 10 ? `...and ${result.items.length - 10} more` : "";
+
+  const asOf =
+    typeof result.as_of_ts === "number"
+      ? `As of: ${new Date(result.as_of_ts * 1000).toISOString()}`
+      : undefined;
+
+  return [
+    `Mindlock pending review (${result.count}):`,
+    asOf,
+    ...lines,
+    more,
+    "Approve: /a <id|index> [reason]",
+    "Reject: /reject <id|index> [reason] (alias: /r)",
+    "Note: /approve is the legacy exec-approval command.",
+  ]
+    .filter((line): line is string => typeof line === "string" && line.trim().length > 0)
+    .join("\n");
+}
+
+function formatMindlockStatusMessage(result: VeriCoreMindlockStatusResult): string {
+  const asOf =
+    typeof result.as_of_ts === "number"
+      ? `As of: ${new Date(result.as_of_ts * 1000).toISOString()}`
+      : undefined;
+
+  return [
+    "Mindlock status:",
+    asOf,
+    `- in: ${result.counts.in}`,
+    `- out: ${result.counts.out}`,
+    `- pending: ${result.counts.pending}`,
+    `- rejected: ${result.counts.rejected}`,
+    "",
+    "Views: /mindlock in|out|pending|rejected [limit]",
+    "Approve: /a <id|index> [reason]",
+    "Reject: /reject <id|index> [reason] (alias: /r)",
+  ]
+    .filter((line) => line !== undefined && line.trim().length > 0)
+    .join("\n");
+}
+
+function formatMindlockListMessage(result: VeriCoreMindlockListResult): string {
+  if (!result.items.length) {
+    return `Mindlock ${result.box} is empty.`;
+  }
+
+  const lines = result.items.slice(0, 20).flatMap((item, index) => {
+    const target = item.target_path ? ` -> ${item.target_path}` : "";
+    const main = `${index + 1}. id=${item.id}${target} (${item.size_bytes} bytes)`;
+    if (item.reviewer_assessment?.verdict && item.reviewer_assessment?.reason) {
+      return [main, `   \u{1F50D} Reviewer: ${item.reviewer_assessment.verdict} \u2014 ${item.reviewer_assessment.reason}`];
+    }
+    return [main];
+  });
+
+  const asOf =
+    typeof result.as_of_ts === "number"
+      ? `As of: ${new Date(result.as_of_ts * 1000).toISOString()}`
+      : undefined;
+
+  return [
+    `Mindlock ${result.box} (${result.count}):`,
+    asOf,
+    ...lines,
+  ]
+    .filter((line) => line !== undefined && line.trim().length > 0)
+    .join("\n");
+}
+
+function formatMindlockDecisionMessage(result: VeriCoreMindlockDecisionResult): string {
+  const lines = [
+    `Mindlock ${result.status}: ${result.id}`,
+    `- source: ${result.source}`,
+  ];
+
+  if (result.target) {
+    lines.push(`- target: ${result.target}`);
+  }
+  if (result.archived_artifact) {
+    lines.push(`- archive: ${result.archived_artifact}`);
+  }
+  if (result.rejected_artifact) {
+    lines.push(`- rejected: ${result.rejected_artifact}`);
+  }
+
+  return lines.join("\n");
+}
+
 function hasInboundMedia(msg: Message): boolean {
   return (
     Boolean(msg.media_group_id) ||
@@ -292,8 +487,7 @@ function extractVeriCoreContentFromMessage(msg: Message): string {
   const replyTarget = msg.reply_to_message;
   const replyText = (replyTarget?.text ?? replyTarget?.caption ?? "").trim();
   if (replyText) {
-    parts.push(`[Reply context]
-${replyText}`);
+    parts.push(`[Reply context]\n${replyText}`);
   }
 
   if (!text) {
@@ -376,6 +570,8 @@ export const registerTelegramHandlers = ({
   const textFragmentBuffer = new Map<string, TextFragmentEntry>();
   let textFragmentProcessing: Promise<void> = Promise.resolve();
 
+  const lastGroupReplyAtMs = new Map<string, number>();
+
   const debounceMs = resolveInboundDebounceMs({ cfg, channel: "telegram" });
   const FORWARD_BURST_DEBOUNCE_MS = 80;
   type TelegramDebounceLane = "default" | "forward";
@@ -443,6 +639,49 @@ export const registerTelegramHandlers = ({
     const raw = (process.env.VERICORE_LOG ?? "").trim().toLowerCase();
     return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
   })();
+
+  const resolveMindlockOwnerTelegramIds = (): Set<string> => {
+    const ids = new Set<string>();
+
+    const envId = (process.env.ZAR_TELEGRAM_ID ?? "").trim();
+    if (/^\d+$/.test(envId)) {
+      ids.add(envId);
+    }
+
+    const configuredOwners = cfg.commands?.ownerAllowFrom ?? [];
+    for (const raw of configuredOwners) {
+      const token = String(raw ?? "").trim();
+      if (!token) {
+        continue;
+      }
+
+      if (/^\d+$/.test(token)) {
+        ids.add(token);
+        continue;
+      }
+
+      const lower = token.toLowerCase();
+      if (lower.startsWith("telegram:") || lower.startsWith("tg:")) {
+        const value = token.slice(token.indexOf(":") + 1).trim();
+        if (/^\d+$/.test(value)) {
+          ids.add(value);
+        }
+      }
+    }
+
+    if (!ids.size) {
+      ids.add("181832275");
+    }
+
+    return ids;
+  };
+
+  const mindlockOwnerTelegramIds = resolveMindlockOwnerTelegramIds();
+
+  const isMindlockOwnerSender = (msg: Message): boolean => {
+    const senderId = msg.from?.id != null ? String(msg.from.id) : "";
+    return senderId.length > 0 && mindlockOwnerTelegramIds.has(senderId);
+  };
 
   const resolveVeriCoreChannelForMessage = (msg: Message): string => {
     const isPrivate = msg.chat.type === "private";
@@ -680,6 +919,115 @@ export const registerTelegramHandlers = ({
           runtime.error?.(warn(message));
           await sendVeriCoreDriverResponse(params.msg, message);
           return;
+        }
+      }
+
+      if (
+        isMindlockCommand(route.command) ||
+        isMindlockReviewCommand(route.command) ||
+        isMindlockApproveCommand(route.command) ||
+        isMindlockRejectCommand(route.command)
+      ) {
+        if (!isMindlockOwnerSender(params.msg)) {
+          await sendVeriCoreDriverResponse(
+            params.msg,
+            "Mindlock review commands are owner-only.",
+          );
+          return;
+        }
+
+        if (isMindlockCommand(route.command)) {
+          const parsed = parseMindlockMenuArgs(params.msg.text ?? params.msg.caption ?? "");
+          if (parsed.error) {
+            await sendVeriCoreDriverResponse(params.msg, parsed.error);
+            return;
+          }
+
+          try {
+            if (!parsed.box) {
+              const status = await runVeriCoreMindlockStatus(stimulusInput);
+              await sendVeriCoreDriverResponse(params.msg, formatMindlockStatusMessage(status));
+              return;
+            }
+
+            const listing = await runVeriCoreMindlockList(
+              parsed.box,
+              stimulusInput,
+              parsed.limit,
+            );
+            await sendVeriCoreDriverResponse(params.msg, formatMindlockListMessage(listing));
+            return;
+          } catch (err) {
+            const message = "mindlock command failed: " + String(err);
+            runtime.error?.(warn(message));
+            await sendVeriCoreDriverResponse(params.msg, message);
+            return;
+          }
+        }
+
+        if (isMindlockReviewCommand(route.command)) {
+          try {
+            const result = await runVeriCoreMindlockPending(stimulusInput);
+            await sendVeriCoreDriverResponse(params.msg, formatMindlockPendingMessage(result));
+            return;
+          } catch (err) {
+            const message = "mindlock review failed: " + String(err);
+            runtime.error?.(warn(message));
+            await sendVeriCoreDriverResponse(params.msg, message);
+            return;
+          }
+        }
+
+        if (isMindlockApproveCommand(route.command)) {
+          const parsed = parseMindlockArtifactArgs(params.msg.text ?? params.msg.caption ?? "");
+          if (!parsed.artifactId) {
+            await sendVeriCoreDriverResponse(
+              params.msg,
+              "Usage: /a <artifact_id|index> [reason]",
+            );
+            return;
+          }
+
+          try {
+            const result = await runVeriCoreMindlockApprove(
+              parsed.artifactId,
+              stimulusInput,
+              parsed.reason,
+            );
+            await sendVeriCoreDriverResponse(params.msg, formatMindlockDecisionMessage(result));
+            return;
+          } catch (err) {
+            const message = "mindlock approve failed: " + String(err);
+            runtime.error?.(warn(message));
+            await sendVeriCoreDriverResponse(params.msg, message);
+            return;
+          }
+        }
+
+        if (isMindlockRejectCommand(route.command)) {
+          const parsed = parseMindlockArtifactArgs(params.msg.text ?? params.msg.caption ?? "");
+          if (!parsed.artifactId) {
+            await sendVeriCoreDriverResponse(
+              params.msg,
+              "Usage: /reject <artifact_id|index> [reason] (alias: /r)",
+            );
+            return;
+          }
+
+          try {
+            const result = await runVeriCoreMindlockReject(
+              parsed.artifactId,
+              stimulusInput,
+              parsed.reason,
+            );
+            await sendVeriCoreDriverResponse(params.msg, formatMindlockDecisionMessage(result));
+            return;
+          } catch (err) {
+            const message = "mindlock reject failed: " + String(err);
+            runtime.error?.(warn(message));
+            await sendVeriCoreDriverResponse(params.msg, message);
+            return;
+          }
         }
       }
 
@@ -1087,6 +1435,48 @@ export const registerTelegramHandlers = ({
         senderId,
         senderUsername,
       }));
+
+
+  const shouldSkipGroupByCooldown = (params: {
+    isGroup: boolean;
+    chatId: string | number;
+    resolvedThreadId?: number;
+    groupConfig?: TelegramGroupConfig;
+    text: string;
+    botUsername?: string;
+  }): boolean => {
+    if (!params.isGroup) {
+      return false;
+    }
+
+    const cooldownSeconds = Math.max(
+      0,
+      Math.floor(params.groupConfig?.minReplyIntervalSeconds ?? 0),
+    );
+    if (cooldownSeconds <= 0) {
+      return false;
+    }
+
+    const isControl = hasControlCommand(params.text, cfg, {
+      botUsername: params.botUsername,
+    });
+    if (isControl) {
+      return false;
+    }
+
+    const nowMs = Date.now();
+    const key =
+      params.resolvedThreadId != null
+        ? String(params.chatId) + ":topic:" + String(params.resolvedThreadId)
+        : String(params.chatId);
+    const lastMs = lastGroupReplyAtMs.get(key);
+    if (typeof lastMs === "number" && nowMs - lastMs < cooldownSeconds * 1000) {
+      return true;
+    }
+
+    lastGroupReplyAtMs.set(key, nowMs);
+    return false;
+  };
 
   const shouldSkipGroupMessage = (params: {
     isGroup: boolean;
@@ -1989,6 +2379,22 @@ export const registerTelegramHandlers = ({
           topicConfig,
         })
       ) {
+        return;
+      }
+
+      if (
+        shouldSkipGroupByCooldown({
+          isGroup: event.isGroup,
+          chatId: event.chatId,
+          resolvedThreadId,
+          groupConfig,
+          text: event.msg.text ?? event.msg.caption ?? "",
+          botUsername: event.ctx.me?.username,
+        })
+      ) {
+        logVerbose(
+          `Blocked telegram group ${event.chatId} (reply cooldown: ${groupConfig?.minReplyIntervalSeconds ?? 0}s)`,
+        );
         return;
       }
 

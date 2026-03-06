@@ -5,15 +5,18 @@ use crate::types::{Action, AuditEntry, Effect, Stimulus, Verdict};
 pub struct CoreLoop {
     policy: GatePolicy,
     gas_remaining: u64,
+    unlimited_gas: bool,
     next_seq: u64,
     audit: Vec<AuditEntry>,
 }
 
 impl CoreLoop {
     pub fn new(policy: GatePolicy, gas_budget: u64) -> Self {
+        let unlimited_gas = gas_budget == 0;
         Self {
             policy,
-            gas_remaining: gas_budget,
+            gas_remaining: if unlimited_gas { u64::MAX } else { gas_budget },
+            unlimited_gas,
             next_seq: 0,
             audit: Vec::new(),
         }
@@ -38,7 +41,7 @@ impl CoreLoop {
         let mut effects = Vec::new();
 
         for action in deliberate(&stimulus) {
-            if self.gas_remaining == 0 {
+            if !self.unlimited_gas && self.gas_remaining == 0 {
                 break;
             }
 
@@ -82,7 +85,7 @@ impl CoreLoop {
                 1
             };
 
-            if cost > self.gas_remaining {
+            if !self.unlimited_gas && cost > self.gas_remaining {
                 verdict = Verdict::deny(format!(
                     "insufficient gas: need {cost}, have {}",
                     self.gas_remaining
@@ -90,8 +93,10 @@ impl CoreLoop {
                 cost = 1;
             }
 
-            let debit = cost.min(self.gas_remaining);
-            self.gas_remaining -= debit;
+            if !self.unlimited_gas {
+                let debit = cost.min(self.gas_remaining);
+                self.gas_remaining -= debit;
+            }
 
             let effect = match &verdict {
                 Verdict::Allow => execute(action.executable_action()),
@@ -124,6 +129,9 @@ impl CoreLoop {
             Action::ReadFile { .. } => 2,
             Action::ListDir { .. } => 2,
             Action::WriteFile { .. } => 3,
+            Action::PromoteFromMindlock { .. } => 3,
+            Action::RequestReview { .. } => 2,
+            Action::SelfEscalate { .. } => 1,
             Action::WebFetch { .. } => 4,
             Action::Exec { .. } => 8,
             Action::ToolAction { .. } => 0,
@@ -658,6 +666,34 @@ mod tests {
         assert_eq!(effects.len(), 2);
         assert!(matches!(effects[0], Effect::Executed { .. }));
         assert!(matches!(effects[1], Effect::Denied { .. }));
+    }
+
+    #[test]
+    fn zero_gas_budget_disables_gas_limit() {
+        let (base, roots) = make_test_env();
+        let policy = GatePolicy::new(roots, vec![]);
+        let mut core = CoreLoop::new(policy, 0);
+
+        let effects = core.tick(
+            stim(Channel::TelegramPublic),
+            |_| {
+                vec![
+                    Action::ReadFile {
+                        path: base.join("repos/README.md"),
+                    },
+                    Action::ReadFile {
+                        path: base.join("notes.txt"),
+                    },
+                    Action::ReadFile {
+                        path: base.join("repos/README.md"),
+                    },
+                ]
+            },
+            stub_exec,
+        );
+
+        assert_eq!(effects.len(), 3);
+        assert!(effects.iter().all(|e| matches!(e, Effect::Executed { .. })));
     }
 
     #[test]

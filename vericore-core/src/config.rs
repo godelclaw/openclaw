@@ -19,6 +19,8 @@ pub struct Config {
     pub turn: TurnConfig,
     #[serde(default)]
     pub system_prompt: SystemPromptConfig,
+    #[serde(default)]
+    pub security_review: SecurityReviewConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -143,7 +145,7 @@ pub struct TimeWindow {
     pub allowed_end_hour: u8,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct LlmConfig {
     #[serde(default = "default_model")]
     pub model: String,
@@ -197,6 +199,44 @@ impl Default for TurnConfig {
             max_tool_calls: default_max_tool_calls(),
             finalize_without_tools_on_limit: default_true(),
             history_messages_max: default_history_messages_max(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct SecurityReviewConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub egress_prompt_file: Option<PathBuf>,
+    #[serde(default)]
+    pub ingress_prompt_file: Option<PathBuf>,
+    #[serde(default)]
+    pub reviewer_context_file: Option<PathBuf>,
+    #[serde(default = "default_max_revision_attempts")]
+    pub max_revision_attempts: u32,
+    #[serde(default = "default_mindlock_dir")]
+    pub mindlock_dir: PathBuf,
+    #[serde(default)]
+    pub trusted_write_prefixes: Vec<PathBuf>,
+    #[serde(default = "default_max_precedent_items")]
+    pub max_precedent_items: usize,
+    #[serde(default)]
+    pub llm: Option<LlmConfig>,
+}
+
+impl Default for SecurityReviewConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            egress_prompt_file: None,
+            ingress_prompt_file: None,
+            reviewer_context_file: None,
+            max_revision_attempts: default_max_revision_attempts(),
+            mindlock_dir: default_mindlock_dir(),
+            trusted_write_prefixes: Vec::new(),
+            max_precedent_items: default_max_precedent_items(),
+            llm: None,
         }
     }
 }
@@ -267,4 +307,15 @@ fn default_history_messages_max() -> usize {
 }
 fn default_wildcard_list() -> Vec<String> {
     vec!["*".to_string()]
+}
+
+fn default_max_revision_attempts() -> u32 {
+    1
+}
+fn default_max_precedent_items() -> usize {
+    50
+}
+
+fn default_mindlock_dir() -> PathBuf {
+    PathBuf::from("/home/zarclaw/mindlock")
 }

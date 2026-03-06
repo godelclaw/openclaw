@@ -189,6 +189,11 @@ export type TelegramGroupConfig = {
   requireMention?: boolean;
   /** Per-group override for group message policy (open|disabled|allowlist). */
   groupPolicy?: GroupPolicy;
+  /**
+   * Minimum interval between bot replies in this group, in seconds.
+   * 0/undefined disables cooldown.
+   */
+  minReplyIntervalSeconds?: number;
   /** Optional tool policy overrides for this group. */
   tools?: GroupToolPolicyConfig;
   toolsBySender?: GroupToolPolicyBySenderConfig;
