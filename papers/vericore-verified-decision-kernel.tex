@@ -145,14 +145,38 @@ The review layer is intentionally treated as an external oracle in the formal mo
 Human approval remains a first-class path. In particular, \texttt{self\_escalate} is meant to preserve agency: Oruzi can ask for help directly without the reviewer first granting permission to ask.
 
 \section{What Is Verified Today}
-The crate \texttt{vericore-policy} contains the verified decision kernel. As of March 2026, Verus verifies 21 functions with 0 errors. The verified-and-production-wired surface includes:
+The crate \texttt{vericore-policy} contains verified policy logic at two levels. As of March 2026, Verus verifies 36 functions with 0 errors.
+
+\subsection{Verified Runtime Kernel}
+The following modules are production-wired: the same functions that Verus checks are the ones \texttt{vericore-core} calls for live policy decisions.
 \begin{itemize}[leftmargin=1.5em]
 \item tier definitions and flow-label algebra (\texttt{tiers.rs}): context rank, integrity rank, flow-to, label join,
-\item default channel-to-context and context-to-integrity mapping (\texttt{channels.rs}): the same functions called by \texttt{GatePolicy::context\_for\_channel} and \texttt{integrity\_for\_channel} in production,
+\item default channel-to-context and context-to-integrity mapping (\texttt{channels.rs}): called by \texttt{GatePolicy::context\_for\_channel} and \texttt{integrity\_for\_channel} in production,
 \item ingress decision predicates (\texttt{ingress.rs}): \texttt{ingress\_allows\_exec} and \texttt{ingress\_allows\_write}, called from \texttt{check\_ingress\_integrity} in production.
 \end{itemize}
 
-The important point is not merely that these functions exist in a separate crate. Production code actually calls them for live policy decisions. The verified predicates are not a disconnected model; they are the authoritative runtime logic.
+\subsection{Verified Reference Spec}
+The \texttt{model\_resolution} module (\texttt{model\_resolution.rs}) is a proved reference spec, not a runtime-called kernel. Model fallback selection currently lives in TypeScript (OpenClaw's \texttt{model-fallback.ts}). The Verus-verified module defines the invariants that the TypeScript implementation and its tests should mirror.
+
+The module proves candidate-list policy properties over an abstract \texttt{Seq<ModelRef>}:
+\begin{itemize}[leftmargin=1.5em]
+\item the configured primary model is always first in a policy-ok candidate list,
+\item the candidate list contains no duplicates,
+\item when cross-provider fallback is disabled, every candidate shares the primary's provider,
+\item picking any candidate from a gated list cannot change the provider.
+\end{itemize}
+
+It also provides executable decision functions for resolution metadata (model changed, provider changed, alert severity) and a cross-provider policy gate.
+
+The value is not that the OpenRouter billing issue is now formally prevented at runtime. It is that the structural invariants are stated precisely, proved consistent, and available as regression guards: if someone changes the spec predicates in incompatible ways, the proofs break.
+
+\subsection{The Distinction}
+This separation matters and should be maintained honestly:
+\begin{itemize}[leftmargin=1.5em]
+\item \textbf{Verified runtime kernel}: Verus-checked functions that production calls directly. A bug in these functions would be caught by the prover before deployment.
+\item \textbf{Verified reference spec}: Verus-checked invariants that define what the runtime \emph{should} satisfy. Correspondence between spec and runtime is established by tests, not by the prover.
+\item \textbf{Tested I/O and runtime behavior}: integration tests covering transport, filesystem, async races, and service availability. Verus does not and should not cover these.
+\end{itemize}
 
 \textbf{Remaining drift surface:} \texttt{vericore-core} still has its own copies of the \texttt{Channel}, \texttt{ContextTier}, and \texttt{IntegrityTier} enums, with total-match conversion helpers bridging them to the verified crate. This duplication is acceptable as bootstrap scaffolding but should eventually be consolidated so that verified types are used directly.
 
@@ -208,6 +232,7 @@ The correct near-term sequence is:
 \begin{enumerate}[label=\arabic*.]
 \item \textbf{(done)} ingress predicates Verus-verified and production-wired,
 \item \textbf{(done)} default channel/context/integrity mapping verified and production-wired,
+\item \textbf{(done, reference spec)} model resolution candidate-list policy verified; TS fallback tests should mirror the proved invariants,
 \item extract and verify the pure mindlock transition relation (\texttt{mindlock.rs}),
 \item extract and verify receipt/human-approval authorization (\texttt{receipt.rs}),
 \item harden the gateway-to-daemon authenticity boundary,
@@ -216,15 +241,18 @@ The correct near-term sequence is:
 
 Testing is still required. Verus does not replace integration tests for socket boundaries, filesystem behavior, async races, or service availability. The practical split is:
 \begin{itemize}[leftmargin=1.5em]
-\item \textbf{Verus}: pure policy kernel
-\item \textbf{tests}: I/O and operational integration
+\item \textbf{Verus (runtime kernel)}: pure policy functions called by production,
+\item \textbf{Verus (reference spec)}: proved invariants mirrored by runtime tests,
+\item \textbf{tests}: I/O, operational integration, and spec--runtime correspondence.
 \end{itemize}
 
 \section{Conclusion}
-VeriCore is now past the point where detached proof sketches alone are the main value. Both the ingress decision kernel and the default channel/context/integrity mapping have been extracted, Verus-verified, and wired into production. 21 functions are verified with 0 errors, and the same functions are called by production policy decisions.
+VeriCore is now past the point where detached proof sketches alone are the main value. The ingress decision kernel and the default channel/context/integrity mapping have been extracted, Verus-verified, and wired into production. 36 functions are verified with 0 errors across the crate.
 
-The next targets---mindlock transition logic and receipt authorization---are structurally similar: small pure functions with clear invariants. The verified surface will grow incrementally while keeping the proof boundary tight.
+For the runtime-called kernel (tiers, channels, ingress), the verified predicates are the authoritative runtime logic. For the model resolution spec, the value is different but real: the invariants are stated precisely and proved consistent, so that TypeScript tests can mirror them and future Rust extraction has a ready target.
 
-That combination---verified deterministic policy plus tested transport and operational boundaries---is the strongest realistic path for this architecture.
+The next targets---mindlock transition logic and receipt authorization---are structurally similar to the existing runtime kernel: small pure functions with clear invariants that production will call directly.
+
+That combination---verified deterministic policy for the runtime kernel, verified reference specs for adjacent surfaces, and tested transport and operational boundaries---is the strongest realistic path for this architecture.
 
 \end{document}
