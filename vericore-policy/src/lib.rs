@@ -12,3 +12,4 @@
 pub mod tiers;
 pub mod channels;
 pub mod ingress;
+pub mod model_resolution;
