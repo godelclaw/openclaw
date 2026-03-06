@@ -23,7 +23,6 @@ type ResolvedAgentConfig = {
   skills?: AgentEntry["skills"];
   memorySearch?: AgentEntry["memorySearch"];
   humanDelay?: AgentEntry["humanDelay"];
-  gas?: AgentEntry["gas"];
   heartbeat?: AgentEntry["heartbeat"];
   mcpServers?: AgentEntry["mcpServers"];
   identity?: AgentEntry["identity"];
@@ -131,7 +130,6 @@ export function resolveAgentConfig(
     skills: Array.isArray(entry.skills) ? entry.skills : undefined,
     memorySearch: entry.memorySearch,
     humanDelay: entry.humanDelay,
-    gas: entry.gas,
     heartbeat: entry.heartbeat,
     mcpServers: Array.isArray(entry.mcpServers) ? entry.mcpServers : undefined,
     identity: entry.identity,

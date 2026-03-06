@@ -92,38 +92,6 @@ export const HeartbeatSchema = z
   })
   .optional();
 
-const GasPeriodSchema = z.union([
-  z.literal("daily"),
-  z.literal("weekly"),
-  z.literal("monthly"),
-]);
-
-export const GasSchema = z
-  .object({
-    enabled: z.boolean().optional(),
-    dailyUsd: z.number().nonnegative().optional(),
-    weeklyUsd: z.number().nonnegative().optional(),
-    monthlyUsd: z.number().nonnegative().optional(),
-    thresholds: z.array(z.number().min(1).max(100)).optional(),
-    alerts: z
-      .object({
-        enabled: z.boolean().optional(),
-        periods: z.array(GasPeriodSchema).optional(),
-      })
-      .strict()
-      .optional(),
-  })
-  .strict()
-  .superRefine((value, ctx) => {
-    if (Array.isArray(value.thresholds) && value.thresholds.length === 0) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["thresholds"],
-        message: "must not be empty",
-      });
-    }
-  })
-  .optional();
 
 export const McpServersSchema = z.array(z.unknown()).optional();
 
@@ -752,7 +720,6 @@ export const AgentEntrySchema = z
     skills: z.array(z.string()).optional(),
     memorySearch: MemorySearchSchema,
     humanDelay: HumanDelaySchema.optional(),
-    gas: GasSchema,
     heartbeat: HeartbeatSchema,
     mcpServers: McpServersSchema,
     identity: IdentitySchema,

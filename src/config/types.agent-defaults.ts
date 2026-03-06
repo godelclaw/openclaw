@@ -263,25 +263,6 @@ export type AgentDefaultsConfig = {
      */
     includeReasoning?: boolean;
   };
-  /** Soft budget awareness using provider spend data (currently OpenRouter). */
-  gas?: {
-    /** Enable gas tracking for this agent (default: true when any quota is set). */
-    enabled?: boolean;
-    /** Daily soft quota in USD. */
-    dailyUsd?: number;
-    /** Weekly soft quota in USD. */
-    weeklyUsd?: number;
-    /** Monthly soft quota in USD. */
-    monthlyUsd?: number;
-    /** Alert thresholds as percentages (1-100). Default: [50, 75, 90, 100]. */
-    thresholds?: number[];
-    alerts?: {
-      /** Enable threshold-crossing alerts (default: true). */
-      enabled?: boolean;
-      /** Periods that can emit alerts. Default: ["daily", "weekly", "monthly"]. */
-      periods?: Array<"daily" | "weekly" | "monthly">;
-    };
-  };
   /** Max concurrent agent runs across all conversations. Default: 1 (sequential). */
   maxConcurrent?: number;
   /** Sub-agent defaults (spawned via sessions_spawn). */

@@ -2,7 +2,6 @@ import { z } from "zod";
 import { isValidNonNegativeByteSizeString } from "./byte-size.js";
 import { AgentModelSchema } from "./zod-schema.agent-model.js";
 import {
-  GasSchema,
   HeartbeatSchema,
   McpServersSchema,
   MemorySearchSchema,
@@ -156,7 +155,6 @@ export const AgentDefaultsSchema = z
       ])
       .optional(),
     heartbeat: HeartbeatSchema,
-    gas: GasSchema,
     maxConcurrent: z.number().int().positive().optional(),
     subagents: z
       .object({

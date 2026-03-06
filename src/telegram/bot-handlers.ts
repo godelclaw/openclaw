@@ -1,5 +1,6 @@
 import type { Message, ReactionTypeEmoji } from "@grammyjs/types";
 import { resolveAgentDir, resolveDefaultAgentId } from "../agents/agent-scope.js";
+import { hasControlCommand } from "../auto-reply/command-detection.js";
 import {
   createInboundDebouncer,
   resolveInboundDebounceMs,
@@ -98,6 +99,15 @@ function isMediaSizeLimitError(err: unknown): boolean {
 
 function isRecoverableMediaGroupError(err: unknown): boolean {
   return err instanceof MediaFetchError || isMediaSizeLimitError(err);
+}
+
+function resolveMinReplyIntervalSeconds(
+  groupConfig?: TelegramGroupConfig | TelegramDirectConfig,
+): number {
+  if (!groupConfig || !("minReplyIntervalSeconds" in groupConfig)) {
+    return 0;
+  }
+  return groupConfig.minReplyIntervalSeconds ?? 0;
 }
 
 function isMemoryStatusCommand(command?: string | null): boolean {
@@ -1452,7 +1462,7 @@ export const registerTelegramHandlers = ({
     isGroup: boolean;
     chatId: string | number;
     resolvedThreadId?: number;
-    groupConfig?: TelegramGroupConfig;
+    groupConfig?: TelegramGroupConfig | TelegramDirectConfig;
     text: string;
     botUsername?: string;
   }): boolean => {
@@ -1462,7 +1472,7 @@ export const registerTelegramHandlers = ({
 
     const cooldownSeconds = Math.max(
       0,
-      Math.floor(params.groupConfig?.minReplyIntervalSeconds ?? 0),
+      Math.floor(resolveMinReplyIntervalSeconds(params.groupConfig)),
     );
     if (cooldownSeconds <= 0) {
       return false;
@@ -2463,7 +2473,7 @@ export const registerTelegramHandlers = ({
         })
       ) {
         logVerbose(
-          `Blocked telegram group ${event.chatId} (reply cooldown: ${groupConfig?.minReplyIntervalSeconds ?? 0}s)`,
+          `Blocked telegram group ${event.chatId} (reply cooldown: ${resolveMinReplyIntervalSeconds(groupConfig)}s)`,
         );
         return;
       }
