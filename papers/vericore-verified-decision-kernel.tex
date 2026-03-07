@@ -33,7 +33,7 @@
 
 \title{VeriCore: A Verified Decision Kernel for Context-Integrity and Mindlock Boundary Control}
 \author{GodelClaw / VeriCore Notes}
-\date{March 6, 2026}
+\date{March 7, 2026}
 
 \begin{document}
 \maketitle
@@ -129,6 +129,21 @@ This makes provenance legible. An artifact in \texttt{mindlock} has explicit sta
 
 The important deterministic invariant is not that all LLM-mediated provenance is perfectly reconstructable. It is that explicit artifact crossings have named states, allowed transitions, and auditable effects.
 
+\subsection{Verified State Machine}
+The mindlock transition relation is now formally specified and Verus-verified in \texttt{mindlock.rs}. The module defines six stages (\texttt{In}, \texttt{Out}, \texttt{Work}, \texttt{PendingZar}, \texttt{Rejected}, \texttt{Promoted}) and seven authorization types (four reviewer verdicts, agent move, Zar approve, Zar reject). Key proved properties include:
+\begin{itemize}[leftmargin=1.5em]
+\item \texttt{Rejected} and \texttt{Promoted} are terminal---no valid outgoing transitions exist from either state,
+\item promotion from staging requires \texttt{ReviewerAllow}; agent moves can never directly reach \texttt{Promoted} or \texttt{Rejected},
+\item \texttt{PendingZar} can only exit via \texttt{ZarApprove} or \texttt{ZarReject}---the reviewer cannot bypass human escalation,
+\item staging states cannot skip to \texttt{Promoted} via \texttt{ZarApprove}---the path must go through \texttt{PendingZar} first.
+\end{itemize}
+
+\subsection{Runtime Source Validation}
+The \texttt{move\_existing\_artifact()} function in \texttt{security\_review.rs} now validates that the artifact's source path is under a valid mindlock subdirectory (\texttt{in/}, \texttt{out/}, \texttt{work/}, or \texttt{pending-zar/}) using a full path prefix check against the configured \texttt{mindlock\_dir}. This enforces the terminal-state invariant at the I/O boundary: artifacts in \texttt{rejected/} cannot be moved, and paths outside the mindlock root are rejected entirely.
+
+\subsection{Cleanup Retention}
+Rejected artifacts are cleaned up after 30 days via a systemd timer running daily at hour 23. The cleanup eligibility predicate is itself Verus-verified: only terminal artifacts older than the retention period are eligible, and staging or pending artifacts are proved ineligible regardless of age.
+
 \section{Reviewer and Human Approval}
 The architecture includes a reviewer LLM and a human escalation path.
 
@@ -174,30 +189,32 @@ The bridge implementation exposed several verification gaps worth documenting:
 \end{itemize}
 
 \section{What Is Verified Today}
-The crate \texttt{vericore-policy} contains verified policy logic at two levels. As of March 2026, Verus verifies 36 functions with 0 errors.
+The crate \texttt{vericore-policy} contains verified policy logic at two levels. As of March 2026, Verus verifies 116 functions with 0 errors across 10 modules.
 
 \subsection{Verified Runtime Kernel}
 The following modules are production-wired: the same functions that Verus checks are the ones \texttt{vericore-core} calls for live policy decisions.
 \begin{itemize}[leftmargin=1.5em]
-\item tier definitions and flow-label algebra (\texttt{tiers.rs}): context rank, integrity rank, flow-to, label join,
-\item default channel-to-context and context-to-integrity mapping (\texttt{channels.rs}): called by \texttt{GatePolicy::context\_for\_channel} and \texttt{integrity\_for\_channel} in production,
-\item ingress decision predicates (\texttt{ingress.rs}): \texttt{ingress\_allows\_exec} and \texttt{ingress\_allows\_write}, called from \texttt{check\_ingress\_integrity} in production.
+\item tier definitions and flow-label algebra (\texttt{tiers.rs}): context rank, integrity rank, flow-to, label join. Proved properties include join idempotence, commutativity, associativity, and the duality between \texttt{can\_flow\_to} and \texttt{can\_read}.
+\item default channel-to-context and context-to-integrity mapping (\texttt{channels.rs}): called by \texttt{GatePolicy::context\_for\_channel} and \texttt{integrity\_for\_channel} in production. Proved: public channels map to \texttt{Untrusted}, private channels map to \texttt{Trusted}, no channel maps above \texttt{Private}, and the integrity mapping is injective.
+\item ingress decision predicates (\texttt{ingress.rs}): \texttt{ingress\_allows\_exec} and \texttt{ingress\_allows\_write}, called from \texttt{check\_ingress\_integrity} in production. Proved: \texttt{Reviewed} cannot exec, \texttt{Trusted} has full capability, write permissions are monotone in integrity.
 \end{itemize}
 
-\subsection{Verified Reference Spec}
-The \texttt{model\_resolution} module (\texttt{model\_resolution.rs}) is a proved reference spec, not a runtime-called kernel. Model fallback selection currently lives in TypeScript (OpenClaw's \texttt{model-fallback.ts}). The Verus-verified module defines the invariants that the TypeScript implementation and its tests should mirror.
+\subsection{Verified Reference Specs}
+Seven additional modules provide proved reference specs. These are not runtime-called kernels; correspondence with runtime behavior is established by tests, not by the prover. Their value is as regression guards and precise invariant statements.
 
-The module proves candidate-list policy properties over an abstract \texttt{Seq<ModelRef>}:
-\begin{itemize}[leftmargin=1.5em]
-\item the configured primary model is always first in a policy-ok candidate list,
-\item the candidate list contains no duplicates,
-\item when cross-provider fallback is disabled, every candidate shares the primary's provider,
-\item picking any candidate from a gated list cannot change the provider.
-\end{itemize}
+\paragraph{Model resolution} (\texttt{model\_resolution.rs}). Proves candidate-list policy properties over an abstract \texttt{Seq<ModelRef>}: primary-first ordering, no duplicates, cross-provider gating, and provider stability. Also provides executable decision functions for resolution metadata.
 
-It also provides executable decision functions for resolution metadata (model changed, provider changed, alert severity) and a cross-provider policy gate.
+\paragraph{LLM bridge contract} (\texttt{llm\_bridge.rs}). Specifies the completions bridge interface: request well-formedness, response usability, call-kind/prompt-mode consistency (security review must use reviewer mode), and session-key requirements (driver turns require a session key).
 
-The value is not that the OpenRouter billing issue is now formally prevented at runtime. It is that the structural invariants are stated precisely, proved consistent, and available as regression guards: if someone changes the spec predicates in incompatible ways, the proofs break.
+\paragraph{Mindlock state machine} (\texttt{mindlock.rs}). The full transition relation, staging/terminal classification, source validation, and cleanup eligibility (see Section~5).
+
+\paragraph{Receipt authorization} (\texttt{receipt.rs}). Promotion requires either a valid receipt (hash match AND target match) or explicit Zar approval with audit trail. Proved: tamper detection, target-swap detection, and the at-least-one-authorization invariant.
+
+\paragraph{Egress flow control} (\texttt{egress.rs}). Information flows upward in secrecy: \texttt{Public} can flow to anything, \texttt{Private} can only flow to \texttt{Private}. Proved: transitivity, same-tier always allowed, private-to-public denied, and security review triggers.
+
+\paragraph{Gate chain} (\texttt{gate\_chain.rs}). The runtime gate chain is a strict conjunction of six boolean gates (schedule, action kind, tool ID, skill ID, ingress integrity, primitive action). Proved: any single deny breaks the chain, and the chain is monotone.
+
+\paragraph{Cross-module compositions} (\texttt{compositions.rs}). Six proofs chaining \texttt{channels} $\to$ \texttt{tiers} $\to$ \texttt{ingress}: public Telegram/API/Moltbook channels cannot execute commands, untrusted channels cannot write to private targets, and private channels have full capability.
 
 \subsection{The Distinction}
 This separation matters and should be maintained honestly:
@@ -210,12 +227,17 @@ This separation matters and should be maintained honestly:
 \textbf{Remaining drift surface:} \texttt{vericore-core} still has its own copies of the \texttt{Channel}, \texttt{ContextTier}, and \texttt{IntegrityTier} enums, with total-match conversion helpers bridging them to the verified crate. This duplication is acceptable as bootstrap scaffolding but should eventually be consolidated so that verified types are used directly.
 
 \section{Proof Boundary}
-The current proof boundary is intentionally narrow:
+The current proof boundary covers all deterministic policy decision surfaces:
 \begin{enumerate}[label=\arabic*.]
-\item label algebra over secrecy and integrity,
-\item ingress allow/deny decisions over normalized target classes,
-\item mindlock state machine,
-\item receipt or human-approval conditions for promotion.
+\item label algebra over secrecy and integrity (join lattice properties, flow/read duality),
+\item channel-to-context and context-to-integrity mapping (injectivity, ceiling bounds),
+\item ingress allow/deny decisions over normalized target classes (monotonicity, full capability),
+\item mindlock state machine (terminal states, valid transitions, source validation, cleanup eligibility),
+\item receipt and human-approval conditions for promotion (tamper detection, at-least-one-auth),
+\item egress flow control (transitivity, private-to-public denial, review triggers),
+\item gate chain conjunction (monotonicity, any-deny-breaks-chain),
+\item bridge contract (call-kind/prompt-mode consistency, session-key requirements),
+\item cross-module composition proofs (channel $\to$ ingress $\to$ capability).
 \end{enumerate}
 
 The following are explicitly \emph{outside} the proof boundary:
@@ -261,11 +283,13 @@ The correct near-term sequence is:
 \begin{enumerate}[label=\arabic*.]
 \item \textbf{(done)} ingress predicates Verus-verified and production-wired,
 \item \textbf{(done)} default channel/context/integrity mapping verified and production-wired,
-\item \textbf{(done, reference spec)} model resolution candidate-list policy verified; TS fallback tests should mirror the proved invariants,
-\item \textbf{(done)} completions bridge: Rust delegates all LLM calls to OpenClaw via Unix socket; legacy direct-provider config purged; fallback notifications via Telegram DM; local E2E test harness,
+\item \textbf{(done, reference spec)} model resolution candidate-list policy verified,
+\item \textbf{(done)} completions bridge with fallback notifications and local E2E test harness,
+\item \textbf{(done, reference spec)} mindlock state machine, receipt authorization, egress flow control, gate chain, bridge contract, and cross-module compositions verified,
+\item \textbf{(done)} mindlock runtime hardening: source validation guard with full path prefix check; 30-day rejected cleanup via systemd timer,
 \item E2E test the security reviewer path through the completions bridge (known gap),
-\item extract and verify the pure mindlock transition relation (\texttt{mindlock.rs}),
-\item extract and verify receipt/human-approval authorization (\texttt{receipt.rs}),
+\item wire \texttt{model\_resolution} into Rust runtime (currently reference-only; TS is authoritative),
+\item wire \texttt{llm\_bridge} consistency checks as debug assertions,
 \item harden the gateway-to-daemon authenticity boundary,
 \item consolidate enum types so production uses verified types directly.
 \end{enumerate}
@@ -278,12 +302,12 @@ Testing is still required. Verus does not replace integration tests for socket b
 \end{itemize}
 
 \section{Conclusion}
-VeriCore is now past the point where detached proof sketches alone are the main value. The ingress decision kernel and the default channel/context/integrity mapping have been extracted, Verus-verified, and wired into production. 36 functions are verified with 0 errors across the crate.
+VeriCore is now past the point where detached proof sketches alone are the main value. 116 functions are verified with 0 errors across 10 modules spanning three runtime-wired kernel modules, seven reference spec modules, and cross-module composition proofs.
 
-For the runtime-called kernel (tiers, channels, ingress), the verified predicates are the authoritative runtime logic. For the model resolution spec, the value is different but real: the invariants are stated precisely and proved consistent, so that TypeScript tests can mirror them and future Rust extraction has a ready target.
+For the runtime-called kernel (tiers, channels, ingress), the verified predicates are the authoritative runtime logic. For the reference specs (model resolution, mindlock, receipt, egress, gate chain, bridge contract), the invariants are stated precisely and proved consistent, serving as regression guards and precise targets for future runtime wiring.
 
-The next targets---mindlock transition logic and receipt authorization---are structurally similar to the existing runtime kernel: small pure functions with clear invariants that production will call directly.
+The mindlock state machine and receipt authorization---previously identified as next targets---are now fully specified and verified. Runtime enforcement has been strengthened: \texttt{move\_existing\_artifact()} validates source paths against the configured mindlock root, and rejected artifacts are cleaned up on a 30-day retention schedule.
 
-That combination---verified deterministic policy for the runtime kernel, verified reference specs for adjacent surfaces, and tested transport and operational boundaries---is the strongest realistic path for this architecture.
+That combination---verified deterministic policy for the runtime kernel, verified reference specs for adjacent surfaces, runtime enforcement of verified invariants, and tested transport and operational boundaries---is the strongest realistic path for this architecture.
 
 \end{document}

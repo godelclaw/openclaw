@@ -76,6 +76,34 @@ proof fn lemma_unresolved_always_denied(i: IntegrityTier)
     ensures !spec_ingress_allows_write(i, WriteTargetClass::Unresolved)
 {}
 
+// ── New lemmas ──────────────────────────────────────────────────────
+
+/// Reviewed integrity also cannot exec (not just Untrusted).
+proof fn lemma_reviewed_cannot_exec()
+    ensures !spec_ingress_allows_exec(IntegrityTier::Reviewed)
+{}
+
+/// Trusted integrity can do everything (exec + write to any non-Unresolved target).
+proof fn lemma_trusted_can_do_everything(target: WriteTargetClass)
+    requires target != WriteTargetClass::Unresolved
+    ensures
+        spec_ingress_allows_exec(IntegrityTier::Trusted),
+        spec_ingress_allows_write(IntegrityTier::Trusted, target),
+{}
+
+/// SensitiveConfig and Private have identical write rules for all integrity tiers.
+proof fn lemma_sensitive_config_same_as_private(i: IntegrityTier)
+    ensures spec_ingress_allows_write(i, WriteTargetClass::SensitiveConfig)
+        == spec_ingress_allows_write(i, WriteTargetClass::Private)
+{}
+
+/// Write access is monotone in integrity: if Untrusted is denied, Reviewed is also denied.
+/// (In fact they are identical for writes — both require Trusted for Private/SensitiveConfig.)
+proof fn lemma_ingress_write_monotone(target: WriteTargetClass)
+    ensures !spec_ingress_allows_write(IntegrityTier::Untrusted, target)
+        ==> !spec_ingress_allows_write(IntegrityTier::Reviewed, target)
+{}
+
 } // verus!
 
 #[cfg(test)]

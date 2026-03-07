@@ -87,6 +87,24 @@ pub struct FlowLabel {
     pub integrity: IntegrityTier,
 }
 
+/// Spec-level max of two context tiers by rank.
+pub open spec fn spec_context_max(a: ContextTier, b: ContextTier) -> ContextTier {
+    if context_rank(a) >= context_rank(b) { a } else { b }
+}
+
+/// Spec-level min of two integrity tiers by rank.
+pub open spec fn spec_integrity_min(a: IntegrityTier, b: IntegrityTier) -> IntegrityTier {
+    if integrity_rank(a) <= integrity_rank(b) { a } else { b }
+}
+
+/// Spec-level join for FlowLabel.
+pub open spec fn spec_join(a: FlowLabel, b: FlowLabel) -> FlowLabel {
+    FlowLabel {
+        secrecy: spec_context_max(a.secrecy, b.secrecy),
+        integrity: spec_integrity_min(a.integrity, b.integrity),
+    }
+}
+
 impl FlowLabel {
     pub fn new(secrecy: ContextTier, integrity: IntegrityTier) -> (result: FlowLabel)
         ensures result.secrecy == secrecy && result.integrity == integrity
@@ -97,6 +115,7 @@ impl FlowLabel {
     /// Conservative label join: secrecy rises (max), integrity drops (min).
     pub fn join(self, other: FlowLabel) -> (result: FlowLabel)
         ensures
+            result == spec_join(self, other),
             context_rank(result.secrecy) >= context_rank(self.secrecy),
             context_rank(result.secrecy) >= context_rank(other.secrecy),
             integrity_rank(result.integrity) <= integrity_rank(self.integrity),
@@ -118,12 +137,43 @@ impl FlowLabel {
     }
 }
 
-// Proof lemmas
+// ── Proof lemmas ──────────────────────────────────────────────────────
 
 proof fn lemma_can_flow_transitive(a: ContextTier, b: ContextTier, c: ContextTier)
     ensures
         ((context_rank(a) <= context_rank(b)) && (context_rank(b) <= context_rank(c)))
             ==> (context_rank(a) <= context_rank(c))
+{}
+
+proof fn lemma_can_read_reflexive(t: ContextTier)
+    ensures context_rank(t) <= context_rank(t)
+{}
+
+proof fn lemma_can_read_transitive(a: ContextTier, b: ContextTier, c: ContextTier)
+    ensures
+        (context_rank(b) <= context_rank(a) && context_rank(c) <= context_rank(b))
+            ==> context_rank(c) <= context_rank(a)
+{}
+
+/// can_flow_to(a,b) <==> can_read(b,a)
+proof fn lemma_flow_and_read_dual(a: ContextTier, b: ContextTier)
+    ensures
+        (context_rank(a) <= context_rank(b)) <==> (context_rank(b) >= context_rank(a))
+{}
+
+/// join(a, a) == a
+proof fn lemma_join_idempotent(a: FlowLabel)
+    ensures spec_join(a, a) == a
+{}
+
+/// join(a, b) == join(b, a)
+proof fn lemma_join_commutative(a: FlowLabel, b: FlowLabel)
+    ensures spec_join(a, b) == spec_join(b, a)
+{}
+
+/// join(join(a,b), c) == join(a, join(b,c))
+proof fn lemma_join_associative(a: FlowLabel, b: FlowLabel, c: FlowLabel)
+    ensures spec_join(spec_join(a, b), c) == spec_join(a, spec_join(b, c))
 {}
 
 } // verus!

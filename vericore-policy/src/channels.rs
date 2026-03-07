@@ -68,6 +68,34 @@ pub fn default_integrity_for_channel(channel: Channel) -> (result: IntegrityTier
     integrity_for_context(default_context_for_channel(channel))
 }
 
+// ── Proof lemmas ──────────────────────────────────────────────────────
+
+/// All public-facing channels map to Untrusted integrity.
+proof fn lemma_public_channels_untrusted()
+    ensures
+        spec_integrity_for_context(spec_default_context(Channel::TelegramPublic)) == IntegrityTier::Untrusted,
+        spec_integrity_for_context(spec_default_context(Channel::Api)) == IntegrityTier::Untrusted,
+        spec_integrity_for_context(spec_default_context(Channel::Moltbook)) == IntegrityTier::Untrusted,
+{}
+
+/// All private channels map to Trusted integrity.
+proof fn lemma_private_channels_trusted()
+    ensures
+        spec_integrity_for_context(spec_default_context(Channel::TelegramDm)) == IntegrityTier::Trusted,
+        spec_integrity_for_context(spec_default_context(Channel::Internal)) == IntegrityTier::Trusted,
+        spec_integrity_for_context(spec_default_context(Channel::Terminal)) == IntegrityTier::Trusted,
+{}
+
+/// No channel maps to a context tier above Private (i.e., Private is the ceiling).
+proof fn lemma_no_channel_maps_above_private(ch: Channel)
+    ensures crate::tiers::context_rank(spec_default_context(ch)) <= crate::tiers::context_rank(ContextTier::Private)
+{}
+
+/// Context-to-integrity mapping is injective: distinct contexts yield distinct integrity.
+proof fn lemma_integrity_injective_on_context(a: ContextTier, b: ContextTier)
+    ensures a != b ==> spec_integrity_for_context(a) != spec_integrity_for_context(b)
+{}
+
 } // verus!
 
 #[cfg(test)]

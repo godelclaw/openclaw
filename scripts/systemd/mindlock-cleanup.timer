@@ -1,0 +1,9 @@
+[Unit]
+Description=Daily cleanup of rejected mindlock artifacts at bedtime
+
+[Timer]
+OnCalendar=*-*-* 23:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

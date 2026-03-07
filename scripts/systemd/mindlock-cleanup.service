@@ -1,0 +1,6 @@
+[Unit]
+Description=Clean up rejected mindlock artifacts older than 30 days
+
+[Service]
+Type=oneshot
+ExecStart=/home/zarclaw/repos/godelclaw/scripts/mindlock-cleanup.sh

@@ -516,6 +516,26 @@ impl SecurityReviewer {
     ) -> Result<PathBuf, String> {
         self.ensure_mindlock_dirs()?;
 
+        // Source directory validation: enforce terminal-state invariant.
+        // Artifact must be under a valid mindlock subdirectory (full path prefix,
+        // not just basename) to prevent path spoofing like /tmp/in/evil.txt.
+        let valid_source = ["in", "out", "work", "pending-zar"]
+            .iter()
+            .any(|subdir| artifact_path.starts_with(self.mindlock_dir.join(subdir)));
+        if !valid_source {
+            let is_rejected = artifact_path.starts_with(self.mindlock_dir.join("rejected"));
+            if is_rejected {
+                return Err(format!(
+                    "cannot move artifact from terminal state: rejected/ ({})",
+                    artifact_path.display()
+                ));
+            }
+            return Err(format!(
+                "artifact path is not under a valid mindlock staging directory ({})",
+                artifact_path.display()
+            ));
+        }
+
         if !artifact_path.exists() {
             return Err(format!(
                 "mindlock artifact not found for move: {}",

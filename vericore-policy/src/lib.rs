@@ -11,22 +11,30 @@
 //!
 //! ## Runtime-called verified kernel
 //!
-//! The following modules contain functions that production (vericore-core)
-//! calls directly for live policy decisions:
-//!
 //! - `tiers`: context/integrity rank, flow-label algebra
 //! - `channels`: default channel-to-context and context-to-integrity mapping
 //! - `ingress`: ingress allow/deny decisions over normalized target classes
 //!
 //! ## Verified reference specs
 //!
-//! The following modules are proved reference specs. They are not yet called
-//! by runtime but define invariants that TypeScript tests should mirror:
+//! - `model_resolution`: candidate list validity, cross-provider gating
+//! - `llm_bridge`: bridge request/response contract
+//! - `mindlock`: artifact state machine
+//! - `receipt`: promotion authorization
+//! - `egress`: outbound flow control
+//! - `gate_chain`: full gate composition
 //!
-//! - `model_resolution`: candidate list validity, cross-provider gating,
-//!   and resolution metadata for the OpenClaw model fallback resolver
+//! ## Cross-module composition proofs
+//!
+//! - `compositions`: end-to-end properties chaining multiple modules
 
 pub mod tiers;
 pub mod channels;
 pub mod ingress;
 pub mod model_resolution;
+pub mod llm_bridge;
+pub mod mindlock;
+pub mod receipt;
+pub mod egress;
+pub mod gate_chain;
+pub mod compositions;
