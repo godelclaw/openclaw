@@ -20,7 +20,7 @@ use tokio::time;
 
 use crate::config::Config;
 use crate::impetus::{StimulusDecision, StimulusInput, decide_stimulus, route_stimulus};
-use crate::llm::{ChatMessage, LlmClient};
+use crate::llm::{CallKind, ChatMessage, GatewayLlmClient, PromptMode};
 use crate::policy::GatePolicy;
 use crate::turn::run_turn_with_history_with_reviewer_memory;
 use crate::types::ContextTier;
@@ -1328,7 +1328,13 @@ async fn run_nightly_history_extract(
         turns.len()
     );
 
-    let llm = LlmClient::from_config(&shared.config.llm).map_err(|e| e.to_string())?;
+    let llm = GatewayLlmClient::from_config(
+        &shared.config.llm,
+        CallKind::MemoryRefine,
+        PromptMode::Driver,
+        None,
+    )
+    .map_err(|e| e.to_string())?;
     let system_msg = ChatMessage::system(
         "You extract compact factual memory snippets. Be terse and specific. No filler. No meta-commentary. Return ONLY a JSON array of strings, nothing else.",
     );

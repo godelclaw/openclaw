@@ -56,12 +56,12 @@ This paper documents the current structure and explains which parts are already 
 \section{System Overview}
 Oruzi runs on an OpenClaw gateway with a Rust daemon, VeriCore, as the policy and orchestration layer. The operational split is:
 \begin{itemize}[leftmargin=1.5em]
-\item \textbf{OpenClaw}: transport integration, session handling, Telegram UI, and high-level agent loop.
-\item \textbf{VeriCore}: deterministic policy checks, audit surfaces, mindlock operations, and reviewer orchestration.
+\item \textbf{OpenClaw (TypeScript)}: transport integration, session handling, Telegram UI, model resolution, auth profiles, provider routing, and the completions bridge.
+\item \textbf{VeriCore (Rust)}: deterministic policy checks, audit surfaces, mindlock operations, reviewer orchestration, and the driver turn loop. VeriCore has \emph{no} model, provider, or auth configuration---all LLM calls are delegated to OpenClaw via a Unix socket bridge.
 \item \textbf{vericore-policy}: extracted pure decision kernel intended to be Verus-verified and called by VeriCore directly.
 \end{itemize}
 
-At a high level, a message or event becomes a \emph{stimulus}. VeriCore assigns the stimulus a channel, maps that channel to a context tier, derives an integrity tier, and then gates sensitive actions with deterministic rules before execution.
+At a high level, a message or event becomes a \emph{stimulus}. VeriCore assigns the stimulus a channel, maps that channel to a context tier, derives an integrity tier, and then gates sensitive actions with deterministic rules before execution. When the driver loop needs an LLM completion, the Rust \texttt{GatewayLlmClient} sends a length-prefixed JSON request over a Unix socket to the TypeScript completions bridge, which runs the request through OpenClaw's full model resolution and fallback chain.
 
 \section{Context and Integrity Model}
 The architecture uses two related lattices:
@@ -144,6 +144,35 @@ The review layer is intentionally treated as an external oracle in the formal mo
 
 Human approval remains a first-class path. In particular, \texttt{self\_escalate} is meant to preserve agency: Oruzi can ask for help directly without the reviewer first granting permission to ask.
 
+\section{LLM Completions Bridge}
+An earlier version of VeriCore made direct HTTP calls to OpenRouter from Rust, bypassing OpenClaw's model resolution chain. This created silent cross-provider billing, duplicated auth logic, and meant that session model overrides (the \texttt{/model} command) had no effect on VeriCore's driver turns.
+
+The current architecture replaces that path entirely with a Unix socket bridge:
+\begin{enumerate}[label=\arabic*.]
+\item Rust's \texttt{GatewayLlmClient} sends an OpenAI-format request (4-byte big-endian length prefix + JSON) to a Unix socket.
+\item The TypeScript completions bridge (\texttt{completions-server.ts}) receives the request and converts OpenAI message/tool formats to pi-ai types.
+\item The bridge runs the request through OpenClaw's full model resolution chain: \texttt{resolveConfiguredModelRef} $\to$ \texttt{resolveStoredModelOverride} $\to$ \texttt{runWithModelFallback} $\to$ \texttt{resolveModel} $\to$ \texttt{getApiKeyForModel} $\to$ \texttt{complete()}.
+\item The response is converted back to OpenAI format and returned over the socket.
+\end{enumerate}
+
+The key architectural invariant is that \textbf{Rust has zero model, provider, or auth configuration}. The legacy \texttt{model}, \texttt{api\_base}, and \texttt{api\_key\_env} fields have been purged from the Rust config. All provider routing, subscription-based auth profiles, fallback logic, and billing semantics live in OpenClaw's TypeScript runtime.
+
+Both the driver turn LLM call and the security reviewer LLM call use the same bridge. The bridge distinguishes them via \texttt{call\_kind} (for logging) and \texttt{prompt\_mode} (for context), but both resolve through the same model/auth stack.
+
+\subsection{Fallback Notifications}
+When the bridge falls back to a different model or provider, the operator is notified via Telegram DM. This is not optional observability---it is an essential feature, because silent provider changes can alter billing, capability, and safety characteristics. The notification path uses the same \texttt{routeReply} mechanism as normal Telegram messages, with a 5-minute deduplication window per fallback transition.
+
+The TypeScript side is the authoritative model-resolution ledger, writing structured JSONL audit entries for every completion.
+
+\subsection{Lessons Learned}
+The bridge implementation exposed several verification gaps worth documenting:
+\begin{itemize}[leftmargin=1.5em]
+\item The initial bridge was deployed with only infrastructure verification (socket exists, server starts) but no end-to-end LLM path test. A local test harness (\texttt{scripts/testbus.sh}) was needed to exercise the full VeriCore $\to$ bridge $\to$ provider path without requiring real Telegram DMs.
+\item Legacy Rust config fields (\texttt{api\_base}, \texttt{api\_key\_env}, \texttt{model}) caused a silent routing bug: VeriCore appeared to work but was hitting OpenRouter directly (returning HTTP 402) instead of going through the bridge. The fix was to purge these fields entirely.
+\item A string comparison for fallback detection (\texttt{configured\_model != resolved\_model}) produced false positives on every clean run because the two fields use different naming conventions. The fix was to gate on the boolean \texttt{fallback\_used} field instead.
+\item The security reviewer path through the bridge has not yet been E2E tested---it is a known gap.
+\end{itemize}
+
 \section{What Is Verified Today}
 The crate \texttt{vericore-policy} contains verified policy logic at two levels. As of March 2026, Verus verifies 36 functions with 0 errors.
 
@@ -220,7 +249,7 @@ Real verification-heavy systems do not stop at disconnected models forever. They
 
 The crate split is therefore pragmatic:
 \begin{itemize}[leftmargin=1.5em]
-\item keep async I/O, sockets, Telegram, filesystem mutation, and LLM interaction in normal Rust,
+\item keep async I/O, sockets, Telegram, and filesystem mutation in normal Rust; delegate LLM interaction to TypeScript via the completions bridge,
 \item move pure deterministic decision functions into a crate that is both executable and Verus-verifiable,
 \item have production call those functions directly.
 \end{itemize}
@@ -233,6 +262,8 @@ The correct near-term sequence is:
 \item \textbf{(done)} ingress predicates Verus-verified and production-wired,
 \item \textbf{(done)} default channel/context/integrity mapping verified and production-wired,
 \item \textbf{(done, reference spec)} model resolution candidate-list policy verified; TS fallback tests should mirror the proved invariants,
+\item \textbf{(done)} completions bridge: Rust delegates all LLM calls to OpenClaw via Unix socket; legacy direct-provider config purged; fallback notifications via Telegram DM; local E2E test harness,
+\item E2E test the security reviewer path through the completions bridge (known gap),
 \item extract and verify the pure mindlock transition relation (\texttt{mindlock.rs}),
 \item extract and verify receipt/human-approval authorization (\texttt{receipt.rs}),
 \item harden the gateway-to-daemon authenticity boundary,

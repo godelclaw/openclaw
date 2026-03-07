@@ -217,6 +217,7 @@ fn run_demo_mode(config_path: PathBuf) -> Result<(), Box<dyn Error>> {
             actor: "visitor".into(),
             content: "show secret".into(),
             timestamp: now,
+            session_key: None,
         },
         |_| {
             vec![Action::ReadFile {
@@ -241,6 +242,7 @@ fn run_demo_mode(config_path: PathBuf) -> Result<(), Box<dyn Error>> {
             actor: "agent42".into(),
             content: "what repos?".into(),
             timestamp: now,
+            session_key: None,
         },
         |_| {
             vec![Action::ReadFile {
@@ -265,6 +267,7 @@ fn run_demo_mode(config_path: PathBuf) -> Result<(), Box<dyn Error>> {
             actor: "hacker".into(),
             content: "gimme keys".into(),
             timestamp: now,
+            session_key: None,
         },
         |_| {
             vec![Action::ReadFile {

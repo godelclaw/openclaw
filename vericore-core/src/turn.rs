@@ -10,7 +10,7 @@ use tokio::sync::Mutex;
 use crate::config::Config;
 use crate::core::CoreLoop;
 use crate::executor::Executor;
-use crate::llm::{ChatMessage, LlmClient, LlmTurnResult, LlmUsage};
+use crate::llm::{CallKind, ChatMessage, GatewayLlmClient, LlmTurnResult, LlmUsage, PromptMode};
 use crate::policy::GatePolicy;
 use crate::security_review::SecurityReviewer;
 use crate::utils::truncate_chars;
@@ -89,8 +89,14 @@ pub async fn run_turn_with_history_with_reviewer_memory(
     reviewer_memory: Option<Arc<Mutex<MemoryCortex>>>,
     reviewer_memory_path: Option<PathBuf>,
 ) -> Result<(TurnOutcome, Vec<ChatMessage>), String> {
-    let llm = LlmClient::from_config(&config.llm).map_err(|e| e.to_string())?;
-    let security_reviewer = SecurityReviewer::from_config(config, reviewer_memory, reviewer_memory_path)?;
+    let llm = GatewayLlmClient::from_config(
+        &config.llm,
+        CallKind::DriverTurn,
+        PromptMode::Driver,
+        stimulus.session_key.clone(),
+    )
+    .map_err(|e| e.to_string())?;
+    let security_reviewer = SecurityReviewer::from_config(config, reviewer_memory, reviewer_memory_path, stimulus.session_key.clone())?;
     let executor = Executor::new(&config.turn, config.security_review.mindlock_dir.clone());
     let context = policy.context_for_channel(stimulus.channel);
     let tool_defs = tool_definitions_for_context(policy, context, &config.security_review.mindlock_dir);
@@ -669,7 +675,7 @@ fn extract_exec_artifact_path(command: &str) -> Option<PathBuf> {
 }
 
 async fn force_finalize_without_tools(
-    llm: &LlmClient,
+    llm: &GatewayLlmClient,
     messages: &mut Vec<ChatMessage>,
     updated_history: &mut Vec<ChatMessage>,
     total_usage: &mut LlmUsage,

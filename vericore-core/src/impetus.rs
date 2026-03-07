@@ -191,6 +191,7 @@ impl StimulusInput {
             actor: self.actor.clone(),
             content: self.content.clone(),
             timestamp: self.timestamp.unwrap_or(now),
+            session_key: self.session_key.clone(),
         })
     }
 }

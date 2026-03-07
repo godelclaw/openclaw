@@ -11,7 +11,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 
 use crate::config::{Config, LlmConfig};
-use crate::llm::{ChatMessage, LlmClient, LlmTurnResult};
+use crate::llm::{CallKind, ChatMessage, GatewayLlmClient, LlmTurnResult, PromptMode};
 use crate::types::{Action, ContextTier, IntegrityTier, SecurityReviewDecision, SecurityVerdict};
 
 const DEFAULT_EGRESS_PROMPT: &str = r#"You are a security reviewer for outward messages.
@@ -39,7 +39,7 @@ const OLLAMA_EMBED_DEFAULT_URL: &str = "http://127.0.0.1:11434/api/embeddings";
 
 #[derive(Clone)]
 pub struct SecurityReviewer {
-    llm: LlmClient,
+    llm: GatewayLlmClient,
     egress_prompt: String,
     ingress_prompt: String,
     reviewer_context: String,
@@ -73,6 +73,7 @@ impl SecurityReviewer {
         config: &Config,
         memory: Option<Arc<Mutex<MemoryCortex>>>,
         memory_path: Option<PathBuf>,
+        session_key: Option<String>,
     ) -> Result<Option<Self>, String> {
         if !config.security_review.enabled {
             return Ok(None);
@@ -83,8 +84,13 @@ impl SecurityReviewer {
             .llm
             .clone()
             .unwrap_or_else(|| config.llm.clone());
-        let llm = LlmClient::from_config(&llm_cfg)
-            .map_err(|e| format!("security reviewer llm init failed: {e}"))?;
+        let llm = GatewayLlmClient::from_config(
+            &llm_cfg,
+            CallKind::SecurityReview,
+            PromptMode::Reviewer,
+            session_key,
+        )
+        .map_err(|e| format!("security reviewer llm init failed: {e}"))?;
 
         let egress_prompt = read_prompt(
             config.security_review.egress_prompt_file.as_deref(),

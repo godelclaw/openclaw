@@ -147,12 +147,8 @@ pub struct TimeWindow {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct LlmConfig {
-    #[serde(default = "default_model")]
-    pub model: String,
-    #[serde(default = "default_api_base")]
-    pub api_base: String,
-    #[serde(default = "default_api_key_env")]
-    pub api_key_env: String,
+    #[serde(default)]
+    pub gateway_socket: Option<String>,
     #[serde(default = "default_max_tokens")]
     pub max_tokens: u32,
     #[serde(default = "default_temperature")]
@@ -164,9 +160,7 @@ pub struct LlmConfig {
 impl Default for LlmConfig {
     fn default() -> Self {
         Self {
-            model: default_model(),
-            api_base: default_api_base(),
-            api_key_env: default_api_key_env(),
+            gateway_socket: None,
             max_tokens: default_max_tokens(),
             temperature: default_temperature(),
             timeout_secs: default_llm_timeout(),
@@ -271,15 +265,6 @@ impl Config {
 
 fn default_true() -> bool {
     true
-}
-fn default_model() -> String {
-    "x-ai/grok-4.1-fast".into()
-}
-fn default_api_base() -> String {
-    "https://openrouter.ai/api/v1".into()
-}
-fn default_api_key_env() -> String {
-    "OPENROUTER_API_KEY".into()
 }
 fn default_max_tokens() -> u32 {
     4096

@@ -186,6 +186,7 @@ mod tests {
             actor: "test".into(),
             content: "test".into(),
             timestamp: 1,
+            session_key: None,
         }
     }
 

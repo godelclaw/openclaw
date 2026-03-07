@@ -95,6 +95,7 @@ pub struct Stimulus {
     pub actor: String,
     pub content: String,
     pub timestamp: u64,
+    pub session_key: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

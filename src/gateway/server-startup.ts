@@ -22,6 +22,7 @@ import { loadInternalHooks } from "../hooks/loader.js";
 import { isTruthyEnvValue } from "../infra/env.js";
 import type { loadOpenClawPlugins } from "../plugins/loader.js";
 import { type PluginServicesHandle, startPluginServices } from "../plugins/services.js";
+import { startCompletionsServer } from "../vericore/completions-server.js";
 import { startBrowserControlServerIfEnabled } from "./server-browser.js";
 import {
   scheduleRestartSentinelWake,
@@ -67,6 +68,14 @@ export async function startGatewaySidecars(params: {
     browserControl = await startBrowserControlServerIfEnabled();
   } catch (err) {
     params.logBrowser.error(`server failed to start: ${String(err)}`);
+  }
+
+  // Start VeriCore completions bridge (Rust→TS LLM delegation).
+  let completionsBridge: ReturnType<typeof startCompletionsServer> | null = null;
+  try {
+    completionsBridge = startCompletionsServer({ cfg: params.cfg });
+  } catch (err) {
+    params.log.warn(`completions bridge failed to start: ${String(err)}`);
   }
 
   // Start Gmail watcher if configured (hooks.gmail.account).
@@ -187,5 +196,5 @@ export async function startGatewaySidecars(params: {
     }, 750);
   }
 
-  return { browserControl, pluginServices };
+  return { browserControl, pluginServices, completionsBridge };
 }

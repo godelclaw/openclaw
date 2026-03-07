@@ -82,9 +82,7 @@ utc_offset = 1
 
 
 [llm]
-model = "anthropic/claude-sonnet-4.6"
-api_base = "https://openrouter.ai/api/v1"
-api_key_env = "OPENROUTER_API_KEY"
+gateway_socket = "/run/user/1001/openclaw-completions.sock"
 max_tokens = 4096
 temperature = 0.7
 timeout_secs = 120
