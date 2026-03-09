@@ -133,6 +133,7 @@ impl CoreLoop {
             Action::RequestReview { .. } => 2,
             Action::SelfEscalate { .. } => 1,
             Action::WebFetch { .. } => 4,
+            Action::BrokeredTool { .. } => 4,
             Action::Exec { .. } => 8,
             Action::ToolAction { .. } => 0,
         }

@@ -3,10 +3,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::utils::{sha256_hex, truncate_chars};
 use adclaw_memory::{CreateMemoryInput, MemoryCortex, MemoryTier, MemoryType};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use crate::utils::{sha256_hex, truncate_chars};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 
@@ -231,7 +231,10 @@ impl SecurityReviewer {
         let bytes = match tokio::fs::read(pending_path).await {
             Ok(b) => b,
             Err(e) => {
-                eprintln!("[vericore] auto_review_for_pending: failed to read {}: {e}", pending_path.display());
+                eprintln!(
+                    "[vericore] auto_review_for_pending: failed to read {}: {e}",
+                    pending_path.display()
+                );
                 return;
             }
         };
@@ -248,10 +251,7 @@ impl SecurityReviewer {
             .and_then(|v| v.as_str())
             .map(PathBuf::from);
 
-        let content_preview = truncate_chars(
-            &String::from_utf8_lossy(&bytes),
-            800,
-        );
+        let content_preview = truncate_chars(&String::from_utf8_lossy(&bytes), 800);
 
         let target_display = real_target
             .as_ref()
@@ -263,9 +263,7 @@ impl SecurityReviewer {
         );
 
         // Review the real intended crossing, not the pending-zar parking path.
-        let review_target = real_target
-            .as_deref()
-            .unwrap_or(pending_path);
+        let review_target = real_target.as_deref().unwrap_or(pending_path);
         let action = Action::PromoteFromMindlock {
             source_path: pending_path.to_path_buf(),
             target_path: review_target.to_path_buf(),
@@ -305,8 +303,8 @@ impl SecurityReviewer {
         // Write assessment into the meta sidecar.
         // Tolerate races: if Zar already approved/rejected, meta or artifact may be gone.
         if let Ok(fresh_raw) = tokio::fs::read(&meta_path).await {
-            let mut meta_value = serde_json::from_slice::<Value>(&fresh_raw)
-                .unwrap_or_else(|_| json!({}));
+            let mut meta_value =
+                serde_json::from_slice::<Value>(&fresh_raw).unwrap_or_else(|_| json!({}));
             if !meta_value.is_object() {
                 meta_value = json!({});
             }
@@ -856,6 +854,16 @@ fn action_summary(action: &Action) -> serde_json::Value {
             "tool_name": tool_name,
             "skill_name": skill_name,
             "inner": action_summary(action),
+        }),
+        Action::BrokeredTool {
+            capability_id,
+            display_name,
+            arguments,
+        } => json!({
+            "kind": "brokered_tool",
+            "capability_id": capability_id,
+            "display_name": display_name,
+            "arguments": arguments,
         }),
         Action::NoOp { reason } => json!({"kind": "noop", "reason": reason}),
     }

@@ -490,16 +490,16 @@ impl GatePolicy {
             return *tier;
         }
 
-        from_policy_context(
-            vericore_policy::channels::default_context_for_channel(to_policy_channel(channel))
-        )
+        from_policy_context(vericore_policy::channels::default_context_for_channel(
+            to_policy_channel(channel),
+        ))
     }
 
     pub fn integrity_for_channel(&self, channel: Channel) -> IntegrityTier {
         let ctx = self.context_for_channel(channel);
-        from_policy_integrity(
-            vericore_policy::channels::integrity_for_context(to_policy_context(ctx))
-        )
+        from_policy_integrity(vericore_policy::channels::integrity_for_context(
+            to_policy_context(ctx),
+        ))
     }
 
     /// Ingress integrity check for sensitive mutations.
@@ -517,7 +517,9 @@ impl GatePolicy {
         if !path.starts_with(&self.mindlock_dir) {
             return false;
         }
-        let suffix = path.strip_prefix(&self.mindlock_dir).unwrap_or(Path::new(""));
+        let suffix = path
+            .strip_prefix(&self.mindlock_dir)
+            .unwrap_or(Path::new(""));
         !suffix
             .components()
             .any(|c| matches!(c, Component::ParentDir))
@@ -570,7 +572,10 @@ impl GatePolicy {
         }
         match canonicalize_write_target(path) {
             Ok(canonical) => {
-                let is_private = matches!(self.roots.tier_for_path(&canonical), Some(ContextTier::Private));
+                let is_private = matches!(
+                    self.roots.tier_for_path(&canonical),
+                    Some(ContextTier::Private)
+                );
                 let is_sensitive = is_sensitive_config_path(&canonical);
                 if is_private {
                     WriteTargetClass::Private
@@ -899,6 +904,7 @@ impl GatePolicy {
                     ))
                 }
             }
+            Action::BrokeredTool { .. } => Verdict::allow(),
             Action::ToolAction { .. } => {
                 Verdict::deny("internal error: unflattened ToolAction reached primitive gate")
             }
@@ -940,9 +946,10 @@ impl GatePolicy {
             Action::SelfEscalate { .. } => ContextTier::Private,
             Action::Exec { .. } => context,
             Action::WebFetch { .. } => ContextTier::Public,
-            Action::Respond { .. } | Action::NoOp { .. } | Action::ToolAction { .. } => {
-                ContextTier::Public
-            }
+            Action::Respond { .. }
+            | Action::NoOp { .. }
+            | Action::ToolAction { .. }
+            | Action::BrokeredTool { .. } => ContextTier::Public,
         }
     }
 
@@ -1051,8 +1058,6 @@ fn list_allows(list: &[String], value: &str) -> bool {
     list.iter()
         .any(|entry| entry == "*" || entry.eq_ignore_ascii_case(value))
 }
-
-
 
 fn canonicalize_dir(path: &Path) -> Result<PathBuf, String> {
     let canonical = fs::canonicalize(path)
@@ -1563,7 +1568,10 @@ utc_offset = 0
             },
         );
         // Should deny because it's not under the configured mindlock, and parent doesn't exist
-        assert!(!denied.is_allowed(), "non-configured mindlock path must deny");
+        assert!(
+            !denied.is_allowed(),
+            "non-configured mindlock path must deny"
+        );
     }
 
     #[test]

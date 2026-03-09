@@ -16,6 +16,8 @@ pub struct Config {
     #[serde(default)]
     pub llm: LlmConfig,
     #[serde(default)]
+    pub tool_broker: ToolBrokerConfig,
+    #[serde(default)]
     pub turn: TurnConfig,
     #[serde(default)]
     pub system_prompt: SystemPromptConfig,
@@ -169,6 +171,26 @@ impl Default for LlmConfig {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct ToolBrokerConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub gateway_socket: Option<String>,
+    #[serde(default = "default_tool_broker_timeout")]
+    pub timeout_secs: u64,
+}
+
+impl Default for ToolBrokerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            gateway_socket: None,
+            timeout_secs: default_tool_broker_timeout(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
 pub struct TurnConfig {
     #[serde(default = "default_max_iterations")]
     pub max_iterations: u32,
@@ -274,6 +296,9 @@ fn default_temperature() -> f64 {
 }
 fn default_llm_timeout() -> u64 {
     120
+}
+fn default_tool_broker_timeout() -> u64 {
+    60
 }
 fn default_max_iterations() -> u32 {
     20

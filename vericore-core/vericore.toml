@@ -108,3 +108,8 @@ max_revision_attempts = 1
 max_precedent_items = 50
 mindlock_dir = "/home/zarclaw/mindlock"
 trusted_write_prefixes = ["/home/zarclaw/repos", "/home/zarclaw/governance-reasoning-engine", "/home/zarclaw/mettaclaw"]
+
+[tool_broker]
+enabled = true
+gateway_socket = "/run/user/1001/openclaw-toolbroker.sock"
+timeout_secs = 60

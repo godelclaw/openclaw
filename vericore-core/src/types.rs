@@ -141,6 +141,11 @@ pub enum Action {
         skill_name: Option<String>,
         action: Box<Action>,
     },
+    BrokeredTool {
+        capability_id: String,
+        display_name: String,
+        arguments: serde_json::Value,
+    },
     NoOp {
         reason: String,
     },
@@ -160,6 +165,7 @@ impl Action {
             Action::SelfEscalate { .. } => "self_escalate",
             Action::WebFetch { .. } => "web_fetch",
             Action::ToolAction { action, .. } => action.kind(),
+            Action::BrokeredTool { .. } => "brokered_tool",
             Action::NoOp { .. } => "noop",
         }
     }

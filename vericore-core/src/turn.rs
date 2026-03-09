@@ -1,4 +1,4 @@
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -13,12 +13,13 @@ use crate::executor::Executor;
 use crate::llm::{CallKind, ChatMessage, GatewayLlmClient, LlmTurnResult, LlmUsage, PromptMode};
 use crate::policy::GatePolicy;
 use crate::security_review::SecurityReviewer;
-use crate::utils::truncate_chars;
+use crate::tool_broker::{GatewayToolBrokerClient, ToolDescriptor};
 use crate::tools::{parse_tool_call, tool_definitions_for_context};
 use crate::types::{
     Action, ContextTier, Effect, IntegrityTier, SecurityHold, SecurityReviewDecision,
     SecurityVerdict, Stimulus,
 };
+use crate::utils::truncate_chars;
 
 const FINALIZE_FALLBACK_TEXT: &str = "I hit a tool-loop limit and could not safely produce a final response. Please try a more specific request.";
 
@@ -96,10 +97,48 @@ pub async fn run_turn_with_history_with_reviewer_memory(
         stimulus.session_key.clone(),
     )
     .map_err(|e| e.to_string())?;
-    let security_reviewer = SecurityReviewer::from_config(config, reviewer_memory, reviewer_memory_path, stimulus.session_key.clone())?;
+    let security_reviewer = SecurityReviewer::from_config(
+        config,
+        reviewer_memory,
+        reviewer_memory_path,
+        stimulus.session_key.clone(),
+    )?;
     let executor = Executor::new(&config.turn, config.security_review.mindlock_dir.clone());
     let context = policy.context_for_channel(stimulus.channel);
-    let tool_defs = tool_definitions_for_context(policy, context, &config.security_review.mindlock_dir);
+    // Initialize tool broker if configured
+    let (broker_client, brokered_tools): (Option<GatewayToolBrokerClient>, Vec<ToolDescriptor>) =
+        if config.tool_broker.enabled {
+            match GatewayToolBrokerClient::from_config(
+                &config.tool_broker,
+                stimulus.session_key.clone(),
+            ) {
+                Ok(broker) => match broker.list_tools().await {
+                    Ok(tools) => {
+                        eprintln!(
+                            "[vericore] tool broker: {} brokered tools available",
+                            tools.len()
+                        );
+                        (Some(broker), tools)
+                    }
+                    Err(e) => {
+                        eprintln!("[vericore] tool broker list_tools failed (degraded mode): {e}");
+                        (Some(broker), vec![])
+                    }
+                },
+                Err(e) => {
+                    eprintln!("[vericore] tool broker init failed (degraded mode): {e}");
+                    (None, vec![])
+                }
+            }
+        } else {
+            (None, vec![])
+        };
+    let tool_defs = tool_definitions_for_context(
+        policy,
+        context,
+        &config.security_review.mindlock_dir,
+        &brokered_tools,
+    );
 
     let mut messages = Vec::with_capacity(history.len() + 2);
     messages.push(ChatMessage::system(system_prompt));
@@ -150,7 +189,10 @@ pub async fn run_turn_with_history_with_reviewer_memory(
                 messages.push(assistant_message.clone());
                 updated_history.push(assistant_message);
 
-                let actions: Vec<_> = tool_calls.iter().map(parse_tool_call).collect();
+                let actions: Vec<_> = tool_calls
+                    .iter()
+                    .map(|tc| parse_tool_call(tc, &brokered_tools))
+                    .collect();
 
                 // Pass 1: gate all actions through policy (synchronous)
                 let effects = core.tick(
@@ -226,12 +268,15 @@ pub async fn run_turn_with_history_with_reviewer_memory(
                                         source_path,
                                         reason,
                                     },
-                                ) => self_escalate_artifact(
-                                    reviewer,
-                                    source_path,
-                                    reason,
-                                    &mut security_hold,
-                                ).await,
+                                ) => {
+                                    self_escalate_artifact(
+                                        reviewer,
+                                        source_path,
+                                        reason,
+                                        &mut security_hold,
+                                    )
+                                    .await
+                                }
                                 (Some(reviewer), Action::Exec { command }) => {
                                     match maybe_guard_exec_artifact(reviewer, command) {
                                         Ok(()) => {
@@ -239,6 +284,36 @@ pub async fn run_turn_with_history_with_reviewer_memory(
                                             executor.execute_tool(call).await.content
                                         }
                                         Err(message) => message,
+                                    }
+                                }
+                                (
+                                    _,
+                                    Action::BrokeredTool {
+                                        capability_id,
+                                        arguments,
+                                        ..
+                                    },
+                                ) => {
+                                    if let Some(ref broker) = broker_client {
+                                        tools_used.push(call.name.clone());
+                                        match broker
+                                            .call_tool(capability_id, arguments.clone(), None)
+                                            .await
+                                        {
+                                            Ok(result) => {
+                                                if result.is_error
+                                                    && !result.result.starts_with("Error:")
+                                                    && !result.result.starts_with("Blocked:")
+                                                {
+                                                    format!("Error: {}", result.result)
+                                                } else {
+                                                    result.result
+                                                }
+                                            }
+                                            Err(e) => format!("Error: tool broker error: {e}"),
+                                        }
+                                    } else {
+                                        "Error: tool broker unavailable (degraded mode)".to_string()
                                     }
                                 }
                                 _ => {
@@ -315,12 +390,10 @@ async fn review_boundary_crossing(
     execute_on_allow: bool,
 ) -> Result<BoundaryReviewOutcome, String> {
     let Some(stage) = mindlock_stage(source_path, reviewer.mindlock_dir()) else {
-        return Ok(BoundaryReviewOutcome::Message(
-            format!(
-                "SECURITY REVIEW: source_path must be under {0}/in, {0}/out, or {0}/work",
-                reviewer.mindlock_dir().display()
-            ),
-        ));
+        return Ok(BoundaryReviewOutcome::Message(format!(
+            "SECURITY REVIEW: source_path must be under {0}/in, {0}/out, or {0}/work",
+            reviewer.mindlock_dir().display()
+        )));
     };
 
     let promote_action = Action::PromoteFromMindlock {
@@ -573,7 +646,10 @@ fn maybe_guard_exec_artifact(reviewer: &SecurityReviewer, command: &str) -> Resu
         })
 }
 
-fn validate_mindlock_housekeeping_command(command: &str, mindlock_root: &Path) -> Option<Result<(), String>> {
+fn validate_mindlock_housekeeping_command(
+    command: &str,
+    mindlock_root: &Path,
+) -> Option<Result<(), String>> {
     let trimmed = command.trim();
     if trimmed.is_empty() {
         return None;
@@ -733,8 +809,6 @@ fn reached_tool_call_limit(attempted_tool_calls: u32, max_tool_calls: u32) -> bo
     max_tool_calls != 0 && attempted_tool_calls >= max_tool_calls
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -777,8 +851,10 @@ mod tests {
 
     #[test]
     fn housekeeping_validator_allows_mindlock_only_paths() {
-        let verdict =
-            validate_mindlock_housekeeping_command("mkdir -p /home/zarclaw/mindlock/work/scratch", test_mindlock_root());
+        let verdict = validate_mindlock_housekeeping_command(
+            "mkdir -p /home/zarclaw/mindlock/work/scratch",
+            test_mindlock_root(),
+        );
         assert!(matches!(verdict, Some(Ok(()))));
     }
 
@@ -793,8 +869,10 @@ mod tests {
 
     #[test]
     fn housekeeping_validator_ignores_non_mindlock_housekeeping_commands() {
-        let verdict =
-            validate_mindlock_housekeeping_command("rm -rf /home/zarclaw/repos/godelclaw/tmp", test_mindlock_root());
+        let verdict = validate_mindlock_housekeeping_command(
+            "rm -rf /home/zarclaw/repos/godelclaw/tmp",
+            test_mindlock_root(),
+        );
         assert!(verdict.is_none());
     }
 

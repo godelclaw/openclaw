@@ -43,6 +43,8 @@ export type McpToolHandle = {
   /** Original MCP tool name (before uniquifying). */
   mcpName: string;
   serverName: string;
+  /** Stable capability ID for policy authorization: "mcp:<serverName>:<mcpName>". */
+  capabilityId: string;
   description?: string;
   inputSchema?: Record<string, unknown>;
   call: (params: Record<string, unknown>, opts?: McpRequestOptions) => Promise<unknown>;
@@ -701,6 +703,7 @@ export async function initMcpRuntime(params: {
         name: uniqueName,
         mcpName: originalName,
         serverName,
+        capabilityId: `mcp:${serverName}:${originalName}`,
         description: tool.description,
         inputSchema: tool.inputSchema,
         call: async (toolParams, opts) => {

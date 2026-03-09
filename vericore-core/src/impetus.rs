@@ -141,7 +141,12 @@ pub fn route_stimulus(policy: &GatePolicy, input: &StimulusInput) -> StimulusRou
     let preference = input.route_preference.unwrap_or(RoutePreference::Fallback);
     let route = match preference {
         RoutePreference::Driver => RouteTarget::Driver,
-        RoutePreference::Off | RoutePreference::Gate | RoutePreference::Fallback => {
+        RoutePreference::Gate => {
+            // Deprecated: gate mode collapsed into driver mode.
+            eprintln!("[vericore] route_preference=gate is deprecated; treating as driver");
+            RouteTarget::Driver
+        }
+        RoutePreference::Off | RoutePreference::Fallback => {
             RouteTarget::Fallback
         }
     };
@@ -402,7 +407,7 @@ mod tests {
     }
 
     #[test]
-    fn route_falls_back_when_driver_not_requested() {
+    fn route_gate_maps_to_driver() {
         let policy = make_policy();
         let route = route_stimulus(
             &policy,
@@ -413,6 +418,25 @@ mod tests {
                 timestamp: None,
                 session_key: None,
                 route_preference: Some(RoutePreference::Gate),
+            },
+        );
+        assert!(route.allow);
+        // Gate is deprecated and now maps to Driver
+        assert_eq!(route.route, RouteTarget::Driver);
+    }
+
+    #[test]
+    fn route_falls_back_when_off() {
+        let policy = make_policy();
+        let route = route_stimulus(
+            &policy,
+            &StimulusInput {
+                channel: "telegram_dm".to_string(),
+                actor: "zar".to_string(),
+                content: "hello".to_string(),
+                timestamp: None,
+                session_key: None,
+                route_preference: Some(RoutePreference::Off),
             },
         );
         assert!(route.allow);

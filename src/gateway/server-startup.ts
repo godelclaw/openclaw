@@ -23,6 +23,7 @@ import { isTruthyEnvValue } from "../infra/env.js";
 import type { loadOpenClawPlugins } from "../plugins/loader.js";
 import { type PluginServicesHandle, startPluginServices } from "../plugins/services.js";
 import { startCompletionsServer } from "../vericore/completions-server.js";
+import { startToolBrokerServer } from "../vericore/tool-broker-server.js";
 import { startBrowserControlServerIfEnabled } from "./server-browser.js";
 import {
   scheduleRestartSentinelWake,
@@ -76,6 +77,13 @@ export async function startGatewaySidecars(params: {
     completionsBridge = startCompletionsServer({ cfg: params.cfg });
   } catch (err) {
     params.log.warn(`completions bridge failed to start: ${String(err)}`);
+  }
+  // Start VeriCore tool broker (Rust→TS MCP tool delegation).
+  let toolBroker: ReturnType<typeof startToolBrokerServer> | null = null;
+  try {
+    toolBroker = startToolBrokerServer({ cfg: params.cfg });
+  } catch (err) {
+    params.log.warn(`tool broker failed to start: ${String(err)}`);
   }
 
   // Start Gmail watcher if configured (hooks.gmail.account).
@@ -196,5 +204,5 @@ export async function startGatewaySidecars(params: {
     }, 750);
   }
 
-  return { browserControl, pluginServices, completionsBridge };
+  return { browserControl, pluginServices, completionsBridge, toolBroker };
 }

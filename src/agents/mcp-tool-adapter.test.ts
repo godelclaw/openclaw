@@ -9,6 +9,7 @@ describe("mcp tool adapter", () => {
         name: "lean_check",
         mcpName: "lean_check",
         serverName: "lean-lsp",
+        capabilityId: "mcp:lean-lsp:lean_check",
         description: "Check Lean source",
         inputSchema: {
           type: "object",
@@ -43,6 +44,7 @@ describe("mcp tool adapter", () => {
         name: "lean_check",
         mcpName: "lean_check",
         serverName: "lean-lsp",
+        capabilityId: "mcp:lean-lsp:lean_check",
         inputSchema: undefined,
         call: async () => {
           throw new Error("server down");

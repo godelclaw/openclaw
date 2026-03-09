@@ -648,13 +648,19 @@ export const registerTelegramHandlers = ({
     return { message, me: ctx.me, getFile };
   };
 
-  type VeriCoreMode = "off" | "gate" | "driver";
+  type VeriCoreMode = "off" | "driver";
   const resolveVeriCoreMode = (): VeriCoreMode => {
-    const raw = (process.env.VERICORE_MODE ?? "off").trim().toLowerCase();
-    if (raw === "gate" || raw === "driver") {
-      return raw;
+    const raw = (process.env.VERICORE_MODE ?? "driver").trim().toLowerCase();
+    if (raw === "off") {
+      return "off";
     }
-    return "off";
+    if (raw === "gate") {
+      // Deprecated: gate mode is now driver mode. gate as a separate mode is removed.
+      runtime.error?.(warn("[vericore] VERICORE_MODE=gate is deprecated; treating as driver"));
+      return "driver";
+    }
+    // "driver" or any unrecognized value defaults to driver
+    return "driver";
   };
   const vericoreMode = resolveVeriCoreMode();
   const vericoreLogEnabled = (() => {
@@ -745,9 +751,6 @@ export const registerTelegramHandlers = ({
   const resolveVeriCoreRoutePreference = (): VeriCoreRoutePreference => {
     if (vericoreMode === "driver") {
       return "driver";
-    }
-    if (vericoreMode === "gate") {
-      return "gate";
     }
     return "off";
   };

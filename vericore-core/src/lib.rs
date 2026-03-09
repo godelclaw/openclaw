@@ -6,6 +6,7 @@ pub mod impetus;
 pub mod llm;
 pub mod policy;
 pub mod security_review;
+pub mod tool_broker;
 pub mod tools;
 pub mod turn;
 pub mod types;

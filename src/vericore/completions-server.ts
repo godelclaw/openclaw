@@ -1,6 +1,5 @@
 import { createServer, type Server } from "node:net";
 import fs from "node:fs";
-import path from "node:path";
 import os from "node:os";
 
 import {
@@ -17,15 +16,16 @@ import {
 } from "@mariozechner/pi-ai";
 
 import type { OpenClawConfig } from "../config/config.js";
-import { resolveStateDir } from "../config/paths.js";
-import { resolveOpenClawAgentDir } from "../agents/agent-paths.js";
-import { resolveAgentSessionDirs } from "../agents/session-dirs.js";
+import { resolveSessionAgent } from "./session-resolver.js";
+import { resolveStorePath } from "../config/sessions.js";
 import { DEFAULT_MODEL, DEFAULT_PROVIDER } from "../agents/defaults.js";
 import { resolveConfiguredModelRef } from "../agents/model-selection.js";
 import { resolveRunModelFallbacksOverride } from "../agents/agent-scope.js";
 import { runWithModelFallback } from "../agents/model-fallback.js";
 import { resolveModel } from "../agents/pi-embedded-runner/model.js";
 import { getApiKeyForModel } from "../agents/model-auth.js";
+import { normalizeToolParameters } from "../agents/pi-tools.schema.js";
+import type { AnyAgentTool } from "../agents/tools/common.js";
 import { resolveStoredModelOverride } from "../auto-reply/reply/model-selection.js";
 import { loadSessionStore } from "../config/sessions/store.js";
 import {
@@ -171,12 +171,25 @@ function convertOpenAIMessagesToPiAi(messages: OpenAIMessage[]): {
   };
 }
 
-function convertOpenAIToolsToPiAi(tools: OpenAIToolDef[]): PiTool[] {
-  return tools.map((t) => ({
-    name: t.function.name,
-    description: t.function.description ?? "",
-    parameters: (t.function.parameters ?? {}) as PiTool["parameters"],
-  }));
+function convertOpenAIToolsToPiAi(
+  tools: OpenAIToolDef[],
+  options?: { modelProvider?: string; modelId?: string },
+): PiTool[] {
+  return tools.map((t) => {
+    const normalized = normalizeToolParameters(
+      {
+        name: t.function.name,
+        description: t.function.description ?? "",
+        parameters: (t.function.parameters ?? {}) as Record<string, unknown>,
+      } as AnyAgentTool,
+      options,
+    );
+    return {
+      name: normalized.name,
+      description: normalized.description ?? "",
+      parameters: (normalized.parameters ?? {}) as PiTool["parameters"],
+    };
+  });
 }
 
 function convertPiAiResponseToBridge(
@@ -242,10 +255,13 @@ async function resolveAndRunOpenClawCompletion(
   req: BridgeRequest,
   cfg: OpenClawConfig,
 ): Promise<BridgeResponse> {
-  // v1: main-agent-only. resolveOpenClawAgentDir() resolves to the primary agent
-  // directory, not a session-derived one. Multi-agent support would require
-  // deriving agentId from sessionKey — that is a v2 concern.
-  const agentDir = resolveOpenClawAgentDir();
+  // v2: session-derived agent resolution. Resolves agentId from session_key
+  // (format: "agent:<agentId>:<channel>:..."), then looks up the correct
+  // agent directory and MCP server configuration for that agent.
+  const { agentId, agentDir } = resolveSessionAgent({
+    sessionKey: req.session_key,
+    cfg,
+  });
 
   // 1. Resolve primary model (session override or config default)
   const { provider: defaultProvider, model: defaultModel } = resolveConfiguredModelRef({
@@ -260,11 +276,8 @@ async function resolveAndRunOpenClawCompletion(
   // 2. Check session model override (from /model command)
   if (req.session_key) {
     try {
-      const stateDir = resolveStateDir(process.env);
-      const sessionDirs = await resolveAgentSessionDirs(stateDir);
-      for (const sessDir of sessionDirs) {
-        const storePath = path.join(sessDir, "sessions.json");
-        if (!fs.existsSync(storePath)) continue;
+      const storePath = resolveStorePath(cfg.session?.store, { agentId });
+      if (fs.existsSync(storePath)) {
         const sessionStore = loadSessionStore(storePath);
         const override = resolveStoredModelOverride({
           sessionStore,
@@ -273,7 +286,6 @@ async function resolveAndRunOpenClawCompletion(
         if (override) {
           if (override.provider) primaryProvider = override.provider;
           primaryModel = override.model;
-          break;
         }
       }
     } catch (err) {
@@ -291,7 +303,6 @@ async function resolveAndRunOpenClawCompletion(
 
   // 4. Run with fallback chain
   const { systemPrompt, messages: piMessages } = convertOpenAIMessagesToPiAi(req.messages);
-  const piTools = req.tools ? convertOpenAIToolsToPiAi(req.tools) : undefined;
 
   const result = await runWithModelFallback({
     cfg,
@@ -314,7 +325,12 @@ async function resolveAndRunOpenClawCompletion(
       const context: PiContext = {
         systemPrompt,
         messages: piMessages,
-        tools: piTools,
+        tools: req.tools
+          ? convertOpenAIToolsToPiAi(req.tools, {
+              modelProvider: resolvedProvider,
+              modelId: resolvedModel,
+            })
+          : undefined,
       };
 
       const assistantMsg = await complete(resolved.model, context, {
@@ -370,6 +386,7 @@ async function resolveAndRunOpenClawCompletion(
   // 2. Subsystem log for operational visibility
   log.info(`resolved`, {
     requestId: req.request_id,
+    agentId,
     callKind: req.call_kind,
     configuredModel,
     resolvedModel: result.model,

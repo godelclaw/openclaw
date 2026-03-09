@@ -1,3 +1,4 @@
+use crate::tool_broker::ToolDescriptor;
 use std::path::{Path, PathBuf};
 
 use crate::llm::ToolCall;
@@ -16,6 +17,7 @@ pub fn tool_definitions_for_context(
     policy: &GatePolicy,
     context: ContextTier,
     mindlock_dir: &Path,
+    brokered_tools: &[ToolDescriptor],
 ) -> Vec<serde_json::Value> {
     let mut defs = Vec::new();
 
@@ -149,6 +151,35 @@ pub fn tool_definitions_for_context(
         ));
     }
 
+    // Native tool names — brokered tools must not shadow these.
+    const NATIVE_NAMES: &[&str] = &[
+        "read_file",
+        "write_file",
+        "list_dir",
+        "exec",
+        "web_fetch",
+        "promote_from_mindlock",
+        "request_review",
+        "self_escalate",
+    ];
+
+    // Brokered MCP tools: filtered through the same gate as native tools.
+    // The tool_name used for identity gating is the capability_id.
+    for bt in brokered_tools {
+        // Skip brokered tools whose display name collides with a native tool.
+        // The TS broker server should have uniquified names, but this is a
+        // defensive check to prevent shadowing if that layer is bypassed.
+        if NATIVE_NAMES.contains(&bt.name.as_str()) {
+            eprintln!(
+                "[vericore] warning: brokered tool {} has display name '{}' colliding with native tool, skipping",
+                bt.capability_id, bt.name
+            );
+            continue;
+        }
+        if should_offer(&bt.capability_id, "brokered_tool") {
+            defs.push(make_tool(&bt.name, &bt.description, bt.parameters.clone()));
+        }
+    }
     defs
 }
 
@@ -157,7 +188,7 @@ pub fn tool_definitions_for_context(
 /// Wraps the primitive action in a ToolAction so the gate chain can check tool identity.
 /// Note: skill_name is always None in Phase 1 (VeriCore doesn't have skills yet).
 /// Do not enable gate_skill_identity until skills are wired in a future phase.
-pub fn parse_tool_call(call: &ToolCall) -> Action {
+pub fn parse_tool_call(call: &ToolCall, brokered_tools: &[ToolDescriptor]) -> Action {
     let inner = match call.name.as_str() {
         "read_file" => {
             let path = call.arguments["path"].as_str().unwrap_or("");
@@ -216,15 +247,31 @@ pub fn parse_tool_call(call: &ToolCall) -> Action {
                 reason: reason.to_string(),
             }
         }
-        _ => Action::NoOp {
-            reason: format!("unknown tool: {}", call.name),
-        },
+        other => {
+            // Check if this is a brokered MCP tool (matched by display name)
+            if let Some(bt) = brokered_tools.iter().find(|bt| bt.name == other) {
+                Action::BrokeredTool {
+                    capability_id: bt.capability_id.clone(),
+                    display_name: bt.name.clone(),
+                    arguments: call.arguments.clone(),
+                }
+            } else {
+                Action::NoOp {
+                    reason: format!("unknown tool: {}", call.name),
+                }
+            }
+        }
     };
 
     // Wrap in ToolAction for tool identity gating.
-    // skill_name is None: VeriCore Phase 1 has no skill concept.
+    // For brokered tools, use capability_id as tool_name (stable authorization key).
+    // For native tools, use the tool name directly.
+    let tool_name_for_gate = match &inner {
+        Action::BrokeredTool { capability_id, .. } => capability_id.clone(),
+        _ => call.name.clone(),
+    };
     Action::ToolAction {
-        tool_name: call.name.clone(),
+        tool_name: tool_name_for_gate,
         skill_name: None,
         action: Box::new(inner),
     }
@@ -265,7 +312,7 @@ mod tests {
             name: "read_file".into(),
             arguments: serde_json::json!({"path": "/home/test/file.txt"}),
         };
-        let action = parse_tool_call(&call);
+        let action = parse_tool_call(&call, &[]);
         assert_eq!(action.kind(), "read_file");
         assert_eq!(action.tool_name(), Some("read_file"));
     }
@@ -277,7 +324,7 @@ mod tests {
             name: "exec".into(),
             arguments: serde_json::json!({"command": "ls -la"}),
         };
-        let action = parse_tool_call(&call);
+        let action = parse_tool_call(&call, &[]);
         assert_eq!(action.kind(), "exec");
     }
 
@@ -288,7 +335,7 @@ mod tests {
             name: "web_fetch".into(),
             arguments: serde_json::json!({"url": "https://api.openrouter.ai/v1/models"}),
         };
-        let action = parse_tool_call(&call);
+        let action = parse_tool_call(&call, &[]);
         assert_eq!(action.kind(), "web_fetch");
         match action.executable_action() {
             Action::WebFetch { host, path } => {
@@ -306,8 +353,29 @@ mod tests {
             name: "launch_missiles".into(),
             arguments: serde_json::json!({}),
         };
-        let action = parse_tool_call(&call);
+        let action = parse_tool_call(&call, &[]);
         assert_eq!(action.kind(), "noop");
+    }
+
+    #[test]
+    fn parse_brokered_tool_uses_capability_id_for_gate() {
+        let call = ToolCall {
+            id: "1".into(),
+            name: "lean_goal".into(),
+            arguments: serde_json::json!({"file_path": "/tmp/Test.lean", "line": 10}),
+        };
+        let brokered = vec![ToolDescriptor {
+            capability_id: "mcp:lean-lsp:lean_goal".into(),
+            name: "lean_goal".into(),
+            description: "Show Lean goals".into(),
+            parameters: serde_json::json!({"type": "object"}),
+            source: "mcp".into(),
+            mcp_server: Some("lean-lsp".into()),
+        }];
+
+        let action = parse_tool_call(&call, &brokered);
+        assert_eq!(action.kind(), "brokered_tool");
+        assert_eq!(action.tool_name(), Some("mcp:lean-lsp:lean_goal"));
     }
 
     #[test]
@@ -344,7 +412,12 @@ mod tests {
         );
 
         // Public should only get read_file and list_dir (both gate as read_file action kind)
-        let public_tools = tool_definitions_for_context(&policy, ContextTier::Public, Path::new("/home/zarclaw/mindlock"));
+        let public_tools = tool_definitions_for_context(
+            &policy,
+            ContextTier::Public,
+            Path::new("/home/zarclaw/mindlock"),
+            &[],
+        );
         let public_names: Vec<&str> = public_tools
             .iter()
             .map(|t| t["function"]["name"].as_str().unwrap())
@@ -357,7 +430,12 @@ mod tests {
 
         // Private should get everything (exec allowed via with_exec_in_private)
         let policy = policy.with_exec_in_private(true);
-        let private_tools = tool_definitions_for_context(&policy, ContextTier::Private, Path::new("/home/zarclaw/mindlock"));
+        let private_tools = tool_definitions_for_context(
+            &policy,
+            ContextTier::Private,
+            Path::new("/home/zarclaw/mindlock"),
+            &[],
+        );
         let private_names: Vec<&str> = private_tools
             .iter()
             .map(|t| t["function"]["name"].as_str().unwrap())
@@ -381,7 +459,12 @@ mod tests {
         let roots = ContextRoots::new(&base, base.join("private"), base.join("family")).unwrap();
         let policy = GatePolicy::new(roots, vec![]).with_exec_in_private(true);
 
-        let private_tools = tool_definitions_for_context(&policy, ContextTier::Private, Path::new("/home/zarclaw/mindlock"));
+        let private_tools = tool_definitions_for_context(
+            &policy,
+            ContextTier::Private,
+            Path::new("/home/zarclaw/mindlock"),
+            &[],
+        );
         let private_names: Vec<&str> = private_tools
             .iter()
             .map(|t| t["function"]["name"].as_str().unwrap())
@@ -411,7 +494,12 @@ mod tests {
                 vec!["*".into()],                             // private
             );
 
-        let public_tools = tool_definitions_for_context(&policy, ContextTier::Public, Path::new("/home/zarclaw/mindlock"));
+        let public_tools = tool_definitions_for_context(
+            &policy,
+            ContextTier::Public,
+            Path::new("/home/zarclaw/mindlock"),
+            &[],
+        );
         let public_names: Vec<&str> = public_tools
             .iter()
             .map(|t| t["function"]["name"].as_str().unwrap())
@@ -421,5 +509,43 @@ mod tests {
         assert!(!public_names.contains(&"list_dir")); // not in tool identity allowlist
         assert!(!public_names.contains(&"write_file"));
         assert!(!public_names.contains(&"exec"));
+    }
+
+    #[test]
+    fn brokered_tools_do_not_shadow_native_tool_names() {
+        use crate::policy::ContextRoots;
+        use std::fs;
+
+        let id = format!(
+            "vericore-tools-broker-collision-test-{}",
+            std::process::id()
+        );
+        let base = std::env::temp_dir().join(id);
+        fs::create_dir_all(base.join("private")).unwrap();
+        fs::create_dir_all(base.join("family")).unwrap();
+
+        let roots = ContextRoots::new(&base, base.join("private"), base.join("family")).unwrap();
+        let policy = GatePolicy::new(roots, vec![]).with_exec_in_private(true);
+        let brokered = vec![ToolDescriptor {
+            capability_id: "mcp:test:exec".into(),
+            name: "exec".into(),
+            description: "Colliding MCP exec".into(),
+            parameters: serde_json::json!({"type": "object"}),
+            source: "mcp".into(),
+            mcp_server: Some("test".into()),
+        }];
+
+        let tools = tool_definitions_for_context(
+            &policy,
+            ContextTier::Private,
+            Path::new("/home/zarclaw/mindlock"),
+            &brokered,
+        );
+        let names: Vec<&str> = tools
+            .iter()
+            .map(|t| t["function"]["name"].as_str().unwrap())
+            .collect();
+
+        assert_eq!(names.iter().filter(|name| **name == "exec").count(), 1);
     }
 }
