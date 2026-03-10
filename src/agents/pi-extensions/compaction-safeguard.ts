@@ -1,9 +1,6 @@
-import fs from "node:fs";
-import path from "node:path";
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import type { ExtensionAPI, FileOperations } from "@mariozechner/pi-coding-agent";
-import { extractSections } from "../../auto-reply/reply/post-compaction-context.js";
-import { openBoundaryFile } from "../../infra/boundary-file-read.js";
+import { readLeanWorkspaceIdentityContext } from "../../auto-reply/reply/post-compaction-context.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
 import { extractKeywords, isQueryStopWordToken } from "../../memory/query-expansion.js";
 import {
@@ -645,54 +642,22 @@ function auditSummaryQuality(params: {
 }
 
 /**
- * Read and format critical workspace context for compaction summary.
- * Extracts "Session Startup" and "Red Lines" from AGENTS.md.
- * Falls back to legacy names "Every Session" and "Safety".
- * Limited to 2000 chars to avoid bloating the summary.
+ * Read and format lean workspace identity context for compaction summary.
+ * Includes bounded AGENTS.md and SOUL.md content when present.
  */
 async function readWorkspaceContextForSummary(): Promise<string> {
-  const MAX_SUMMARY_CONTEXT_CHARS = 2000;
-  const workspaceDir = process.cwd();
-  const agentsPath = path.join(workspaceDir, "AGENTS.md");
-
-  try {
-    const opened = await openBoundaryFile({
-      absolutePath: agentsPath,
-      rootPath: workspaceDir,
-      boundaryLabel: "workspace root",
-    });
-    if (!opened.ok) {
-      return "";
-    }
-
-    const content = (() => {
-      try {
-        return fs.readFileSync(opened.fd, "utf-8");
-      } finally {
-        fs.closeSync(opened.fd);
-      }
-    })();
-    // Accept legacy section names ("Every Session", "Safety") as fallback
-    // for backward compatibility with older AGENTS.md templates.
-    let sections = extractSections(content, ["Session Startup", "Red Lines"]);
-    if (sections.length === 0) {
-      sections = extractSections(content, ["Every Session", "Safety"]);
-    }
-
-    if (sections.length === 0) {
-      return "";
-    }
-
-    const combined = sections.join("\n\n");
-    const safeContent =
-      combined.length > MAX_SUMMARY_CONTEXT_CHARS
-        ? combined.slice(0, MAX_SUMMARY_CONTEXT_CHARS) + "\n...[truncated]..."
-        : combined;
-
-    return `\n\n<workspace-critical-rules>\n${safeContent}\n</workspace-critical-rules>`;
-  } catch {
+  const safeContent = await readLeanWorkspaceIdentityContext({
+    workspaceDir: process.cwd(),
+    maxChars: 2000,
+  });
+  if (!safeContent) {
     return "";
   }
+  return `
+
+<workspace-critical-rules>
+${safeContent}
+</workspace-critical-rules>`;
 }
 
 export default function compactionSafeguardExtension(api: ExtensionAPI): void {
@@ -954,7 +919,7 @@ export default function compactionSafeguardExtension(api: ExtensionAPI): void {
       summary = appendSummarySection(summary, toolFailureSection);
       summary = appendSummarySection(summary, fileOpsSummary);
 
-      // Append workspace critical context (Session Startup + Red Lines from AGENTS.md)
+      // Append lean workspace identity context (bounded AGENTS.md + SOUL.md)
       const workspaceContext = await readWorkspaceContextForSummary();
       if (workspaceContext) {
         summary = appendSummarySection(summary, workspaceContext);

@@ -345,40 +345,100 @@ mod tests {
 
     #[test]
     fn reviewer_allow_promotes() {
-        assert!(valid_transition(MindlockStage::In, MindlockStage::Promoted, TransitionAuth::ReviewerAllow));
-        assert!(valid_transition(MindlockStage::Out, MindlockStage::Promoted, TransitionAuth::ReviewerAllow));
-        assert!(valid_transition(MindlockStage::Work, MindlockStage::Promoted, TransitionAuth::ReviewerAllow));
+        assert!(valid_transition(
+            MindlockStage::In,
+            MindlockStage::Promoted,
+            TransitionAuth::ReviewerAllow
+        ));
+        assert!(valid_transition(
+            MindlockStage::Out,
+            MindlockStage::Promoted,
+            TransitionAuth::ReviewerAllow
+        ));
+        assert!(valid_transition(
+            MindlockStage::Work,
+            MindlockStage::Promoted,
+            TransitionAuth::ReviewerAllow
+        ));
     }
 
     #[test]
     fn rejected_is_terminal() {
-        for auth in [TransitionAuth::ReviewerAllow, TransitionAuth::AgentMove, TransitionAuth::ZarApprove] {
-            assert!(!valid_transition(MindlockStage::Rejected, MindlockStage::In, auth));
-            assert!(!valid_transition(MindlockStage::Rejected, MindlockStage::Promoted, auth));
+        for auth in [
+            TransitionAuth::ReviewerAllow,
+            TransitionAuth::AgentMove,
+            TransitionAuth::ZarApprove,
+        ] {
+            assert!(!valid_transition(
+                MindlockStage::Rejected,
+                MindlockStage::In,
+                auth
+            ));
+            assert!(!valid_transition(
+                MindlockStage::Rejected,
+                MindlockStage::Promoted,
+                auth
+            ));
         }
     }
 
     #[test]
     fn promoted_is_terminal() {
-        for auth in [TransitionAuth::ReviewerAllow, TransitionAuth::AgentMove, TransitionAuth::ZarApprove] {
-            assert!(!valid_transition(MindlockStage::Promoted, MindlockStage::In, auth));
-            assert!(!valid_transition(MindlockStage::Promoted, MindlockStage::Rejected, auth));
+        for auth in [
+            TransitionAuth::ReviewerAllow,
+            TransitionAuth::AgentMove,
+            TransitionAuth::ZarApprove,
+        ] {
+            assert!(!valid_transition(
+                MindlockStage::Promoted,
+                MindlockStage::In,
+                auth
+            ));
+            assert!(!valid_transition(
+                MindlockStage::Promoted,
+                MindlockStage::Rejected,
+                auth
+            ));
         }
     }
 
     #[test]
     fn pending_zar_only_exits_via_zar() {
-        assert!(valid_transition(MindlockStage::PendingZar, MindlockStage::Promoted, TransitionAuth::ZarApprove));
-        assert!(valid_transition(MindlockStage::PendingZar, MindlockStage::Rejected, TransitionAuth::ZarReject));
-        assert!(!valid_transition(MindlockStage::PendingZar, MindlockStage::Promoted, TransitionAuth::ReviewerAllow));
-        assert!(!valid_transition(MindlockStage::PendingZar, MindlockStage::In, TransitionAuth::AgentMove));
+        assert!(valid_transition(
+            MindlockStage::PendingZar,
+            MindlockStage::Promoted,
+            TransitionAuth::ZarApprove
+        ));
+        assert!(valid_transition(
+            MindlockStage::PendingZar,
+            MindlockStage::Rejected,
+            TransitionAuth::ZarReject
+        ));
+        assert!(!valid_transition(
+            MindlockStage::PendingZar,
+            MindlockStage::Promoted,
+            TransitionAuth::ReviewerAllow
+        ));
+        assert!(!valid_transition(
+            MindlockStage::PendingZar,
+            MindlockStage::In,
+            TransitionAuth::AgentMove
+        ));
     }
 
     #[test]
     fn agent_move_never_promotes_or_rejects() {
         for from in [MindlockStage::In, MindlockStage::Out, MindlockStage::Work] {
-            assert!(!valid_transition(from, MindlockStage::Promoted, TransitionAuth::AgentMove));
-            assert!(!valid_transition(from, MindlockStage::Rejected, TransitionAuth::AgentMove));
+            assert!(!valid_transition(
+                from,
+                MindlockStage::Promoted,
+                TransitionAuth::AgentMove
+            ));
+            assert!(!valid_transition(
+                from,
+                MindlockStage::Rejected,
+                TransitionAuth::AgentMove
+            ));
         }
     }
 

@@ -1516,9 +1516,10 @@ async function expectWorkspaceSummaryEmptyForAgentsAlias(
   createAlias: (outsidePath: string, agentsPath: string) => void,
 ) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-compaction-summary-"));
+  const outsideRoot = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-compaction-outside-"));
   const prevCwd = process.cwd();
   try {
-    const outside = path.join(root, "outside-secret.txt");
+    const outside = path.join(outsideRoot, "outside-secret.txt");
     fs.writeFileSync(outside, "secret");
     createAlias(outside, path.join(root, "AGENTS.md"));
     process.chdir(root);
@@ -1526,10 +1527,26 @@ async function expectWorkspaceSummaryEmptyForAgentsAlias(
   } finally {
     process.chdir(prevCwd);
     fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(outsideRoot, { recursive: true, force: true });
   }
 }
 
 describe("readWorkspaceContextForSummary", () => {
+  it("includes bounded AGENTS.md and SOUL.md content", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-compaction-summary-"));
+    const prevCwd = process.cwd();
+    try {
+      fs.writeFileSync(path.join(root, "AGENTS.md"), "agent-rule");
+      fs.writeFileSync(path.join(root, "SOUL.md"), "soul-rule");
+      process.chdir(root);
+      await expect(readWorkspaceContextForSummary()).resolves.toContain("agent-rule");
+      await expect(readWorkspaceContextForSummary()).resolves.toContain("soul-rule");
+    } finally {
+      process.chdir(prevCwd);
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it.runIf(process.platform !== "win32")(
     "returns empty when AGENTS.md is a symlink escape",
     async () => {

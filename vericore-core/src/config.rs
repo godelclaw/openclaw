@@ -157,6 +157,8 @@ pub struct LlmConfig {
     pub temperature: f64,
     #[serde(default = "default_llm_timeout")]
     pub timeout_secs: u64,
+    #[serde(default)]
+    pub model_policy: ModelPolicyConfig,
 }
 
 impl Default for LlmConfig {
@@ -166,8 +168,17 @@ impl Default for LlmConfig {
             max_tokens: default_max_tokens(),
             temperature: default_temperature(),
             timeout_secs: default_llm_timeout(),
+            model_policy: ModelPolicyConfig::default(),
         }
     }
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct ModelPolicyConfig {
+    #[serde(default)]
+    pub enforce: bool,
+    #[serde(default)]
+    pub allowlist: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]

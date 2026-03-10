@@ -1,10 +1,9 @@
+import fs from "node:fs/promises";
+import os from "node:os";
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import type { ImageContent } from "@mariozechner/pi-ai";
 import { streamSimple } from "@mariozechner/pi-ai";
 import { createAgentSession, SessionManager, SettingsManager } from "@mariozechner/pi-coding-agent";
-import fs from "node:fs/promises";
-import os from "node:os";
-import type { EmbeddedRunAttemptParams, EmbeddedRunAttemptResult } from "./types.js";
 import { resolveHeartbeatPrompt } from "../../../auto-reply/heartbeat.js";
 import { resolveChannelCapabilities } from "../../../config/channel-capabilities.js";
 import { getMachineDisplayName } from "../../../infra/machine-name.js";
@@ -18,6 +17,7 @@ import { buildTtsSystemPromptHint } from "../../../tts/tts.js";
 import { resolveUserPath } from "../../../utils.js";
 import { normalizeMessageChannel } from "../../../utils/message-channel.js";
 import { isReasoningTagProvider } from "../../../utils/provider-utils.js";
+import { attachStartupIdentityContract } from "../../../vericore/startup-identity.js";
 import { resolveOpenClawAgentDir } from "../../agent-paths.js";
 import { resolveSessionAgentIds } from "../../agent-scope.js";
 import { createAnthropicPayloadLogger } from "../../anthropic-payload-log.js";
@@ -29,6 +29,8 @@ import {
 } from "../../channel-tools.js";
 import { resolveOpenClawDocsPath } from "../../docs-path.js";
 import { isTimeoutError } from "../../failover-error.js";
+import { initMcpRuntime } from "../../mcp-client.js";
+import { toMcpToolDefinitions } from "../../mcp-tool-adapter.js";
 import { resolveModelAuthMode } from "../../model-auth.js";
 import { resolveDefaultModelForAgent } from "../../model-selection.js";
 import {
@@ -42,9 +44,7 @@ import {
   ensurePiCompactionReserveTokens,
   resolveCompactionReserveTokensFloor,
 } from "../../pi-settings.js";
-import { initMcpRuntime } from "../../mcp-client.js";
 import { toClientToolDefinitions } from "../../pi-tool-definition-adapter.js";
-import { toMcpToolDefinitions } from "../../mcp-tool-adapter.js";
 import { createOpenClawCodingTools } from "../../pi-tools.js";
 import { resolveSandboxContext } from "../../sandbox.js";
 import { resolveSandboxRuntimeStatus } from "../../sandbox/runtime-status.js";
@@ -92,6 +92,7 @@ import {
 import { splitSdkTools } from "../tool-split.js";
 import { describeUnknownError, mapThinkingLevel } from "../utils.js";
 import { detectAndLoadPromptImages } from "./images.js";
+import type { EmbeddedRunAttemptParams, EmbeddedRunAttemptResult } from "./types.js";
 
 export function injectHistoryImagesIntoMessages(
   messages: AgentMessage[],
@@ -379,28 +380,30 @@ export async function runEmbeddedAttempt(
       contextFiles,
       memoryCitationsMode: params.config?.memory?.citations,
     });
-    const systemPromptReport = buildSystemPromptReport({
-      source: "run",
-      generatedAt: Date.now(),
-      sessionId: params.sessionId,
-      sessionKey: params.sessionKey,
-      provider: params.provider,
-      model: params.modelId,
-      workspaceDir: effectiveWorkspace,
-      bootstrapMaxChars: resolveBootstrapMaxChars(params.config),
-      sandbox: (() => {
-        const runtime = resolveSandboxRuntimeStatus({
-          cfg: params.config,
-          sessionKey: params.sessionKey ?? params.sessionId,
-        });
-        return { mode: runtime.mode, sandboxed: runtime.sandboxed };
-      })(),
-      systemPrompt: appendPrompt,
-      bootstrapFiles: hookAdjustedBootstrapFiles,
-      injectedFiles: contextFiles,
-      skillsPrompt,
-      tools,
-    });
+    const systemPromptReport = await attachStartupIdentityContract(
+      buildSystemPromptReport({
+        source: "run",
+        generatedAt: Date.now(),
+        sessionId: params.sessionId,
+        sessionKey: params.sessionKey,
+        provider: params.provider,
+        model: params.modelId,
+        workspaceDir: effectiveWorkspace,
+        bootstrapMaxChars: resolveBootstrapMaxChars(params.config),
+        sandbox: (() => {
+          const runtime = resolveSandboxRuntimeStatus({
+            cfg: params.config,
+            sessionKey: params.sessionKey ?? params.sessionId,
+          });
+          return { mode: runtime.mode, sandboxed: runtime.sandboxed };
+        })(),
+        systemPrompt: appendPrompt,
+        bootstrapFiles: hookAdjustedBootstrapFiles,
+        injectedFiles: contextFiles,
+        skillsPrompt,
+        tools,
+      }),
+    );
     const systemPromptOverride = createSystemPromptOverride(appendPrompt);
     const systemPromptText = systemPromptOverride();
 
@@ -794,9 +797,7 @@ export async function runEmbeddedAttempt(
             sessionManager.resetLeaf();
           }
           const sessionContext = sessionManager.buildSessionContext();
-          const sanitizedOrphan = transcriptPolicy.normalizeAntigravityThinkingBlocks
-            ? sanitizeAntigravityThinkingBlocks(sessionContext.messages)
-            : sessionContext.messages;
+          const sanitizedOrphan = sanitizeAntigravityThinkingBlocks(sessionContext.messages);
           activeSession.agent.replaceMessages(sanitizedOrphan);
           log.warn(
             `Removed orphaned user message to prevent consecutive user turns. ` +
@@ -824,9 +825,11 @@ export async function runEmbeddedAttempt(
 
           // Inject history images into their original message positions.
           // This ensures the model sees images in context (e.g., "compare to the first image").
-          const historyImagesByIndex = (imageResult as {
-            historyImagesByIndex?: Map<number, ImageContent[]>;
-          }).historyImagesByIndex;
+          const historyImagesByIndex = (
+            imageResult as {
+              historyImagesByIndex?: Map<number, ImageContent[]>;
+            }
+          ).historyImagesByIndex;
           const didMutate = injectHistoryImagesIntoMessages(
             activeSession.messages,
             historyImagesByIndex,

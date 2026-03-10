@@ -82,6 +82,8 @@ type BridgeResponse = {
   resolved_profile?: string;
   fallback_used?: boolean;
   provider_changed?: boolean;
+  override_model?: string;
+  override_source?: string;
   choices?: Array<{
     message: {
       content?: string | null;
@@ -200,6 +202,8 @@ function convertPiAiResponseToBridge(
   primaryProvider: string,
   fallbackUsed: boolean,
   resolvedProfile?: string,
+  overrideModel?: string,
+  overrideSource?: string,
 ): BridgeResponse {
   let textContent = "";
   const toolCalls: Array<{ id: string; function: { name: string; arguments: string } }> = [];
@@ -226,6 +230,8 @@ function convertPiAiResponseToBridge(
     resolved_profile: resolvedProfile,
     fallback_used: fallbackUsed,
     provider_changed: resolvedProvider !== primaryProvider,
+    override_model: overrideModel,
+    override_source: overrideSource,
     choices: [
       {
         message: {
@@ -272,6 +278,8 @@ async function resolveAndRunOpenClawCompletion(
 
   let primaryProvider = defaultProvider;
   let primaryModel = defaultModel;
+  let overrideModel: string | undefined;
+  let overrideSource: string | undefined;
 
   // 2. Check session model override (from /model command)
   if (req.session_key) {
@@ -286,6 +294,8 @@ async function resolveAndRunOpenClawCompletion(
         if (override) {
           if (override.provider) primaryProvider = override.provider;
           primaryModel = override.model;
+          overrideModel = `${override.provider ?? defaultProvider}/${override.model}`;
+          overrideSource = override.source;
         }
       }
     } catch (err) {
@@ -356,6 +366,8 @@ async function resolveAndRunOpenClawCompletion(
     primaryProvider,
     fallbackUsed,
     resolvedProfile,
+    overrideModel,
+    overrideSource,
   );
 
   // ── Authoritative model-resolution logging (TS is the source of truth) ──

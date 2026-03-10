@@ -1,6 +1,5 @@
 import { spawn } from "node:child_process";
 import { createConnection } from "node:net";
-
 import type { FinalizedMsgContext } from "../auto-reply/templating.js";
 
 const DEFAULT_DECIDE_TIMEOUT_MS = 3000;
@@ -47,6 +46,15 @@ export type VeriCoreTurnOutcome = {
     reason: string;
     held_content: string;
     mindlock_path?: string | null;
+  } | null;
+  model_resolution?: {
+    configured_model?: string | null;
+    resolved_model?: string | null;
+    resolved_provider?: string | null;
+    override_model?: string | null;
+    override_source?: string | null;
+    fallback_used: boolean;
+    provider_changed: boolean;
   } | null;
 };
 
@@ -161,6 +169,13 @@ export type VeriCoreMindlockListResult = {
   as_of_ts?: number;
 };
 
+export type VeriCoreMindlockViewResult = VeriCoreMindlockPendingItem & {
+  stage: "pending";
+  preview: string;
+  preview_truncated: boolean;
+  preview_binary: boolean;
+};
+
 export type VeriCoreMindlockDecisionResult = {
   id: string;
   status: "approved" | "rejected";
@@ -170,6 +185,19 @@ export type VeriCoreMindlockDecisionResult = {
   archived_meta?: string | null;
   rejected_artifact?: string;
   rejected_meta?: string | null;
+};
+
+export type VeriCoreStartupIdentityObservedInput = {
+  agents_available: boolean;
+  agents_injected: boolean;
+  soul_available: boolean;
+  soul_injected: boolean;
+};
+
+export type VeriCoreStartupIdentityContractResult = VeriCoreStartupIdentityObservedInput & {
+  checked: boolean;
+  contract_ok: boolean;
+  error?: string | null;
 };
 
 type VeriCoreSocketResponse<T> = {
@@ -233,6 +261,11 @@ export function deriveVeriCoreChannel(ctx: FinalizedMsgContext): string {
   const source = String(ctx.OriginatingChannel ?? ctx.Surface ?? ctx.Provider ?? "").toLowerCase();
   const chatType = String(ctx.ChatType ?? "").toLowerCase();
   const sessionKey = String(ctx.SessionKey ?? "").toLowerCase();
+  const gatewayScopes = Array.isArray(ctx.GatewayClientScopes)
+    ? ctx.GatewayClientScopes.map((scope) => String(scope).toLowerCase())
+    : [];
+  const isOperatorSurface =
+    gatewayScopes.includes("operator.admin") || gatewayScopes.includes("operator.approvals");
 
   if (
     source === "internal" ||
@@ -272,6 +305,13 @@ export function deriveVeriCoreChannel(ctx: FinalizedMsgContext): string {
     source === "whatsapp" ||
     source === "matrix"
   ) {
+    if (
+      (source === "api" || source === "web" || source === "webchat") &&
+      isOperatorSurface &&
+      ctx.CommandAuthorized
+    ) {
+      return "terminal";
+    }
     return "api";
   }
 
@@ -281,19 +321,9 @@ export function deriveVeriCoreChannel(ctx: FinalizedMsgContext): string {
 export function buildVeriCoreStimulusInput(ctx: FinalizedMsgContext): VeriCoreStimulusInput {
   const channel = deriveVeriCoreChannel(ctx);
   const actor =
-    ctx.SenderId ??
-    ctx.SenderUsername ??
-    ctx.SenderName ??
-    ctx.From ??
-    ctx.SessionKey ??
-    "unknown";
+    ctx.SenderId ?? ctx.SenderUsername ?? ctx.SenderName ?? ctx.From ?? ctx.SessionKey ?? "unknown";
   const content =
-    ctx.BodyForCommands ??
-    ctx.CommandBody ??
-    ctx.RawBody ??
-    ctx.BodyForAgent ??
-    ctx.Body ??
-    "";
+    ctx.BodyForCommands ?? ctx.CommandBody ?? ctx.RawBody ?? ctx.BodyForAgent ?? ctx.Body ?? "";
   const timestamp =
     typeof ctx.Timestamp === "number" && Number.isFinite(ctx.Timestamp)
       ? Math.floor(ctx.Timestamp)
@@ -321,8 +351,10 @@ async function runVeriCoreSocketMethod<T>(
     | "mindlock_pending"
     | "mindlock_status"
     | "mindlock_list"
+    | "mindlock_view"
     | "mindlock_approve"
-    | "mindlock_reject",
+    | "mindlock_reject"
+    | "startup_identity_validate",
   stimulus: VeriCoreStimulusInput | undefined,
   query: string | undefined,
   embed: boolean | undefined,
@@ -358,7 +390,9 @@ async function runVeriCoreSocketMethod<T>(
         const parsed = JSON.parse(response) as VeriCoreSocketResponse<T>;
         if (!parsed.ok) {
           reject(
-            new Error(`vericore socket ${method} failed: ${parsed.error ?? "unknown daemon error"}`),
+            new Error(
+              `vericore socket ${method} failed: ${parsed.error ?? "unknown daemon error"}`,
+            ),
           );
           return;
         }
@@ -781,6 +815,28 @@ export async function runVeriCoreMindlockPending(
   );
 }
 
+export async function runVeriCoreMindlockView(
+  artifactId: string,
+  stimulus: VeriCoreStimulusInput,
+  options: VeriCoreBridgeOptions = {},
+): Promise<VeriCoreMindlockViewResult> {
+  const viewOptions = {
+    ...options,
+    timeoutMs: options.timeoutMs ?? DEFAULT_DECIDE_TIMEOUT_MS,
+  };
+
+  return await runVeriCoreSocketMethod<VeriCoreMindlockViewResult>(
+    "mindlock_view",
+    stimulus,
+    undefined,
+    undefined,
+    viewOptions,
+    {
+      artifact_id: artifactId,
+    },
+  );
+}
+
 export async function runVeriCoreMindlockApprove(
   artifactId: string,
   stimulus: VeriCoreStimulusInput,
@@ -826,6 +882,25 @@ export async function runVeriCoreMindlockReject(
       artifact_id: artifactId,
       reason,
     },
+  );
+}
+
+export async function runVeriCoreStartupIdentityValidate(
+  observed: VeriCoreStartupIdentityObservedInput,
+  options: VeriCoreBridgeOptions = {},
+): Promise<VeriCoreStartupIdentityContractResult> {
+  const validateOptions = {
+    ...options,
+    timeoutMs: options.timeoutMs ?? DEFAULT_DECIDE_TIMEOUT_MS,
+  };
+
+  return await runVeriCoreSocketMethod<VeriCoreStartupIdentityContractResult>(
+    "startup_identity_validate",
+    undefined,
+    undefined,
+    undefined,
+    validateOptions,
+    observed,
   );
 }
 

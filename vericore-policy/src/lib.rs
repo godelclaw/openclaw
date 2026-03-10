@@ -24,17 +24,31 @@
 //! - `egress`: outbound flow control
 //! - `gate_chain`: full gate composition
 //!
+//! ## Tool broker and tool policy specs
+//!
+//! - `tool_broker`: broker request/response contract and parsed capability-ID shape checks
+//! - `tool_policy`: tool authorization, native-shadow guard, and combined tool-gate invariants
+//!
+//! ## Session model policy specs
+//!
+//! - `session_model_policy`: bridge model resolution contract, fallback visibility, allowlist
+//! - `startup_context_policy`: AGENTS/SOUL startup identity boundary contract
+//!
 //! ## Cross-module composition proofs
 //!
 //! - `compositions`: end-to-end properties chaining multiple modules
 
-pub mod tiers;
 pub mod channels;
-pub mod ingress;
-pub mod model_resolution;
-pub mod llm_bridge;
-pub mod mindlock;
-pub mod receipt;
+pub mod compositions;
 pub mod egress;
 pub mod gate_chain;
-pub mod compositions;
+pub mod ingress;
+pub mod llm_bridge;
+pub mod mindlock;
+pub mod model_resolution;
+pub mod receipt;
+pub mod session_model_policy;
+pub mod startup_context_policy;
+pub mod tiers;
+pub mod tool_broker;
+pub mod tool_policy;

@@ -2,7 +2,10 @@ import fs from "node:fs";
 import path from "node:path";
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import type { OpenClawConfig } from "../../config/config.js";
-import { readPostCompactionContext } from "./post-compaction-context.js";
+import {
+  readLeanWorkspaceIdentityContext,
+  readPostCompactionContext,
+} from "./post-compaction-context.js";
 
 describe("readPostCompactionContext", () => {
   const tmpDir = path.join("/tmp", "test-post-compaction-" + Date.now());
@@ -15,197 +18,57 @@ describe("readPostCompactionContext", () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it("returns null when no AGENTS.md exists", async () => {
+  it("returns null when neither AGENTS.md nor SOUL.md exists", async () => {
     const result = await readPostCompactionContext(tmpDir);
     expect(result).toBeNull();
   });
 
-  it("returns null when AGENTS.md has no relevant sections", async () => {
-    fs.writeFileSync(path.join(tmpDir, "AGENTS.md"), "# My Agent\n\nSome content.\n");
-    const result = await readPostCompactionContext(tmpDir);
-    expect(result).toBeNull();
-  });
-
-  it("extracts Session Startup section", async () => {
-    const content = `# Agent Rules
-
-## Session Startup
-
-Read these files:
-1. WORKFLOW_AUTO.md
-2. memory/today.md
-
-## Other Section
-
-Not relevant.
-`;
-    fs.writeFileSync(path.join(tmpDir, "AGENTS.md"), content);
+  it("includes lean AGENTS.md content even without special sections", async () => {
+    fs.writeFileSync(path.join(tmpDir, "AGENTS.md"), "# My Agent\n\nKeep this short.\n");
     const result = await readPostCompactionContext(tmpDir);
     expect(result).not.toBeNull();
-    expect(result).toContain("Session Startup");
-    expect(result).toContain("WORKFLOW_AUTO.md");
-    expect(result).toContain("Post-compaction context refresh");
-    expect(result).not.toContain("Other Section");
+    expect(result).toContain("## AGENTS.md");
+    expect(result).toContain("Keep this short.");
   });
 
-  it("extracts Red Lines section", async () => {
-    const content = `# Rules
-
-## Red Lines
-
-Never do X.
-Never do Y.
-
-## Other
-
-Stuff.
-`;
-    fs.writeFileSync(path.join(tmpDir, "AGENTS.md"), content);
+  it("includes SOUL.md alongside AGENTS.md when both exist", async () => {
+    fs.writeFileSync(path.join(tmpDir, "AGENTS.md"), "# AGENTS\n\nRule A\n");
+    fs.writeFileSync(path.join(tmpDir, "SOUL.md"), "# SOUL\n\nPersona B\n");
     const result = await readPostCompactionContext(tmpDir);
     expect(result).not.toBeNull();
-    expect(result).toContain("Red Lines");
-    expect(result).toContain("Never do X");
+    expect(result).toContain("## AGENTS.md");
+    expect(result).toContain("Rule A");
+    expect(result).toContain("## SOUL.md");
+    expect(result).toContain("Persona B");
   });
 
-  it("extracts both sections", async () => {
-    const content = `# Rules
-
-## Session Startup
-
-Do startup things.
-
-## Red Lines
-
-Never break things.
-
-## Other
-
-Ignore this.
-`;
-    fs.writeFileSync(path.join(tmpDir, "AGENTS.md"), content);
+  it("also works when only SOUL.md exists", async () => {
+    fs.writeFileSync(path.join(tmpDir, "SOUL.md"), "# SOUL\n\nPersona only\n");
     const result = await readPostCompactionContext(tmpDir);
     expect(result).not.toBeNull();
-    expect(result).toContain("Session Startup");
-    expect(result).toContain("Red Lines");
-    expect(result).not.toContain("Other");
+    expect(result).toContain("## SOUL.md");
+    expect(result).toContain("Persona only");
   });
 
-  it("truncates when content exceeds limit", async () => {
-    const longContent = "## Session Startup\n\n" + "A".repeat(4000) + "\n\n## Other\n\nStuff.";
-    fs.writeFileSync(path.join(tmpDir, "AGENTS.md"), longContent);
-    const result = await readPostCompactionContext(tmpDir);
+  it("truncates when combined lean identity content exceeds limit", async () => {
+    fs.writeFileSync(path.join(tmpDir, "AGENTS.md"), "A".repeat(2500));
+    fs.writeFileSync(path.join(tmpDir, "SOUL.md"), "B".repeat(2500));
+    const result = await readLeanWorkspaceIdentityContext({
+      workspaceDir: tmpDir,
+      maxChars: 2000,
+    });
     expect(result).not.toBeNull();
     expect(result).toContain("[truncated]");
   });
 
-  it("matches section names case-insensitively", async () => {
-    const content = `# Rules
-
-## session startup
-
-Read WORKFLOW_AUTO.md
-
-## Other
-`;
-    fs.writeFileSync(path.join(tmpDir, "AGENTS.md"), content);
-    const result = await readPostCompactionContext(tmpDir);
-    expect(result).not.toBeNull();
-    expect(result).toContain("WORKFLOW_AUTO.md");
-  });
-
-  it("matches H3 headings", async () => {
-    const content = `# Rules
-
-### Session Startup
-
-Read these files.
-
-### Other
-`;
-    fs.writeFileSync(path.join(tmpDir, "AGENTS.md"), content);
-    const result = await readPostCompactionContext(tmpDir);
-    expect(result).not.toBeNull();
-    expect(result).toContain("Read these files");
-  });
-
-  it("skips sections inside code blocks", async () => {
-    const content = `# Rules
-
-\`\`\`markdown
-## Session Startup
-This is inside a code block and should NOT be extracted.
-\`\`\`
-
-## Red Lines
-
-Real red lines here.
-
-## Other
-`;
-    fs.writeFileSync(path.join(tmpDir, "AGENTS.md"), content);
-    const result = await readPostCompactionContext(tmpDir);
-    expect(result).not.toBeNull();
-    expect(result).toContain("Real red lines here");
-    expect(result).not.toContain("inside a code block");
-  });
-
-  it("includes sub-headings within a section", async () => {
-    const content = `## Red Lines
-
-### Rule 1
-Never do X.
-
-### Rule 2
-Never do Y.
-
-## Other Section
-`;
-    fs.writeFileSync(path.join(tmpDir, "AGENTS.md"), content);
-    const result = await readPostCompactionContext(tmpDir);
-    expect(result).not.toBeNull();
-    expect(result).toContain("Rule 1");
-    expect(result).toContain("Rule 2");
-    expect(result).not.toContain("Other Section");
-  });
-
-  it.runIf(process.platform !== "win32")(
-    "returns null when AGENTS.md is a symlink escaping workspace",
-    async () => {
-      const outside = path.join(tmpDir, "outside-secret.txt");
-      fs.writeFileSync(outside, "secret");
-      fs.symlinkSync(outside, path.join(tmpDir, "AGENTS.md"));
-
-      const result = await readPostCompactionContext(tmpDir);
-      expect(result).toBeNull();
-    },
-  );
-
-  it.runIf(process.platform !== "win32")(
-    "returns null when AGENTS.md is a hardlink alias",
-    async () => {
-      const outside = path.join(tmpDir, "outside-secret.txt");
-      fs.writeFileSync(outside, "secret");
-      fs.linkSync(outside, path.join(tmpDir, "AGENTS.md"));
-
-      const result = await readPostCompactionContext(tmpDir);
-      expect(result).toBeNull();
-    },
-  );
-
-  it("substitutes YYYY-MM-DD with the actual date in extracted sections", async () => {
-    const content = `## Session Startup
-
-Read memory/YYYY-MM-DD.md and memory/yesterday.md.
-
-## Red Lines
-
-Never modify memory/YYYY-MM-DD.md destructively.
-`;
-    fs.writeFileSync(path.join(tmpDir, "AGENTS.md"), content);
+  it("substitutes YYYY-MM-DD with the actual date in lean identity files", async () => {
+    fs.writeFileSync(
+      path.join(tmpDir, "AGENTS.md"),
+      "Read memory/YYYY-MM-DD.md before replying.\n",
+    );
     const cfg = {
       agents: { defaults: { userTimezone: "America/New_York", timeFormat: "12" } },
     } as OpenClawConfig;
-    // 2026-03-03 14:00 UTC = 2026-03-03 09:00 EST
     const nowMs = Date.UTC(2026, 2, 3, 14, 0, 0);
     const result = await readPostCompactionContext(tmpDir, cfg, nowMs);
     expect(result).not.toBeNull();
@@ -216,68 +79,37 @@ Never modify memory/YYYY-MM-DD.md destructively.
     );
   });
 
-  it("appends current time line even when no YYYY-MM-DD placeholder is present", async () => {
-    const content = `## Session Startup
+  it.runIf(process.platform !== "win32")(
+    "returns null when AGENTS.md is a symlink escaping workspace and no other identity file exists",
+    async () => {
+      const outsideDir = fs.mkdtempSync(path.join("/tmp", "post-compaction-outside-"));
+      try {
+        const outside = path.join(outsideDir, "outside-secret.txt");
+        fs.writeFileSync(outside, "secret");
+        fs.symlinkSync(outside, path.join(tmpDir, "AGENTS.md"));
 
-Read WORKFLOW.md on startup.
-`;
-    fs.writeFileSync(path.join(tmpDir, "AGENTS.md"), content);
-    const nowMs = Date.UTC(2026, 2, 3, 14, 0, 0);
-    const result = await readPostCompactionContext(tmpDir, undefined, nowMs);
-    expect(result).not.toBeNull();
-    expect(result).toContain("Current time:");
-  });
+        const result = await readPostCompactionContext(tmpDir);
+        expect(result).toBeNull();
+      } finally {
+        fs.rmSync(outsideDir, { recursive: true, force: true });
+      }
+    },
+  );
 
-  it("falls back to legacy section names (Every Session / Safety)", async () => {
-    const content = `# Rules
+  it.runIf(process.platform !== "win32")(
+    "returns null when AGENTS.md is a hardlink alias and no other identity file exists",
+    async () => {
+      const outsideDir = fs.mkdtempSync(path.join("/tmp", "post-compaction-outside-"));
+      try {
+        const outside = path.join(outsideDir, "outside-secret.txt");
+        fs.writeFileSync(outside, "secret");
+        fs.linkSync(outside, path.join(tmpDir, "AGENTS.md"));
 
-## Every Session
-
-Read SOUL.md and USER.md.
-
-## Safety
-
-Don't exfiltrate private data.
-
-## Other
-
-Ignore this.
-`;
-    fs.writeFileSync(path.join(tmpDir, "AGENTS.md"), content);
-    const result = await readPostCompactionContext(tmpDir);
-    expect(result).not.toBeNull();
-    expect(result).toContain("Every Session");
-    expect(result).toContain("Read SOUL.md");
-    expect(result).toContain("Safety");
-    expect(result).toContain("Don't exfiltrate");
-    expect(result).not.toContain("Other");
-  });
-
-  it("prefers new section names over legacy when both exist", async () => {
-    const content = `# Rules
-
-## Session Startup
-
-New startup instructions.
-
-## Every Session
-
-Old startup instructions.
-
-## Red Lines
-
-New red lines.
-
-## Safety
-
-Old safety rules.
-`;
-    fs.writeFileSync(path.join(tmpDir, "AGENTS.md"), content);
-    const result = await readPostCompactionContext(tmpDir);
-    expect(result).not.toBeNull();
-    expect(result).toContain("New startup instructions");
-    expect(result).toContain("New red lines");
-    expect(result).not.toContain("Old startup instructions");
-    expect(result).not.toContain("Old safety rules");
-  });
+        const result = await readPostCompactionContext(tmpDir);
+        expect(result).toBeNull();
+      } finally {
+        fs.rmSync(outsideDir, { recursive: true, force: true });
+      }
+    },
+  );
 });

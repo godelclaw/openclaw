@@ -173,6 +173,36 @@ describe("registerTelegramNativeCommands", () => {
     expect(registeredHandlers).not.toContain("export-session");
   });
 
+  it("defers mindlock slash commands to the Telegram message handler fast-path", async () => {
+    const setMyCommands = vi.fn().mockResolvedValue(undefined);
+    const command = vi.fn();
+
+    registerTelegramNativeCommands({
+      ...buildParams({}, "mindlock-fastpath"),
+      bot: {
+        api: {
+          setMyCommands,
+          sendMessage: vi.fn().mockResolvedValue(undefined),
+        },
+        command,
+      } as unknown as Parameters<typeof registerTelegramNativeCommands>[0]["bot"],
+    });
+
+    const registeredCommands = await waitForRegisteredCommands(setMyCommands);
+    expect(registeredCommands.some((entry) => entry.command === "mindlock")).toBe(true);
+    expect(registeredCommands.some((entry) => entry.command === "review")).toBe(true);
+    expect(registeredCommands.some((entry) => entry.command === "view")).toBe(true);
+    expect(registeredCommands.some((entry) => entry.command === "a")).toBe(true);
+    expect(registeredCommands.some((entry) => entry.command === "reject")).toBe(true);
+
+    const registeredHandlers = command.mock.calls.map(([name]) => name);
+    expect(registeredHandlers).not.toContain("mindlock");
+    expect(registeredHandlers).not.toContain("review");
+    expect(registeredHandlers).not.toContain("view");
+    expect(registeredHandlers).not.toContain("a");
+    expect(registeredHandlers).not.toContain("reject");
+  });
+
   it("registers only Telegram-safe command names across native, custom, and plugin sources", async () => {
     const setMyCommands = vi.fn().mockResolvedValue(undefined);
 

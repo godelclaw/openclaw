@@ -10,7 +10,10 @@ use tokio::sync::Mutex;
 use crate::config::Config;
 use crate::core::CoreLoop;
 use crate::executor::Executor;
-use crate::llm::{CallKind, ChatMessage, GatewayLlmClient, LlmTurnResult, LlmUsage, PromptMode};
+use crate::llm::{
+    CallKind, ChatMessage, GatewayLlmClient, LlmTurnResult, LlmUsage, ModelResolutionMeta,
+    PromptMode,
+};
 use crate::policy::GatePolicy;
 use crate::security_review::SecurityReviewer;
 use crate::tool_broker::{GatewayToolBrokerClient, ToolDescriptor};
@@ -31,6 +34,8 @@ pub struct TurnOutcome {
     pub completion_tokens: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub security_hold: Option<SecurityHold>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_resolution: Option<ModelResolutionMeta>,
 }
 
 #[derive(Debug)]
@@ -157,6 +162,7 @@ pub async fn run_turn_with_history_with_reviewer_memory(
     let mut attempted_tool_calls: u32 = 0;
     let mut iterations: u32 = 0;
     let mut security_hold: Option<SecurityHold> = None;
+    let mut model_resolution: Option<ModelResolutionMeta> = None;
     let mut boundary_revision_count: u32 = 0;
 
     loop {
@@ -165,18 +171,25 @@ pub async fn run_turn_with_history_with_reviewer_memory(
         }
         iterations = iterations.saturating_add(1);
 
-        let (result, usage) = llm
+        let (result, usage, model_meta) = llm
             .chat(&messages, &tool_defs)
             .await
             .map_err(|e| e.to_string())?;
         total_usage.prompt_tokens += usage.prompt_tokens;
         total_usage.completion_tokens += usage.completion_tokens;
+        model_resolution = Some(model_meta);
 
         match result {
             LlmTurnResult::FinalResponse { content } => {
                 updated_history.push(ChatMessage::assistant(&content));
                 return Ok((
-                    make_outcome(content, tools_used, &total_usage, security_hold),
+                    make_outcome(
+                        content,
+                        tools_used,
+                        &total_usage,
+                        security_hold,
+                        model_resolution.clone(),
+                    ),
                     updated_history,
                 ));
             }
@@ -333,21 +346,29 @@ pub async fn run_turn_with_history_with_reviewer_memory(
 
                 if reached_tool_call_limit(attempted_tool_calls, config.turn.max_tool_calls) {
                     let forced = if config.turn.finalize_without_tools_on_limit {
-                        force_finalize_without_tools(
+                        let (forced, forced_meta) = force_finalize_without_tools(
                             &llm,
                             &mut messages,
                             &mut updated_history,
                             &mut total_usage,
                             &format!("tool call limit reached ({})", config.turn.max_tool_calls),
                         )
-                        .await?
+                        .await?;
+                        model_resolution = Some(forced_meta);
+                        forced
                     } else {
                         format!("Tool call limit reached ({}).", config.turn.max_tool_calls)
                     };
 
                     updated_history.push(ChatMessage::assistant(&forced));
                     return Ok((
-                        make_outcome(forced, tools_used, &total_usage, security_hold),
+                        make_outcome(
+                            forced,
+                            tools_used,
+                            &total_usage,
+                            security_hold,
+                            model_resolution.clone(),
+                        ),
                         updated_history,
                     ));
                 }
@@ -356,7 +377,7 @@ pub async fn run_turn_with_history_with_reviewer_memory(
     }
 
     if config.turn.finalize_without_tools_on_limit {
-        let forced = force_finalize_without_tools(
+        let (forced, forced_meta) = force_finalize_without_tools(
             &llm,
             &mut messages,
             &mut updated_history,
@@ -364,10 +385,17 @@ pub async fn run_turn_with_history_with_reviewer_memory(
             &format!("max iterations reached ({})", config.turn.max_iterations),
         )
         .await?;
+        model_resolution = Some(forced_meta);
 
         updated_history.push(ChatMessage::assistant(&forced));
         return Ok((
-            make_outcome(forced, tools_used, &total_usage, security_hold),
+            make_outcome(
+                forced,
+                tools_used,
+                &total_usage,
+                security_hold,
+                model_resolution.clone(),
+            ),
             updated_history,
         ));
     }
@@ -375,7 +403,13 @@ pub async fn run_turn_with_history_with_reviewer_memory(
     let fallback = "Max iterations reached without final response.".to_string();
     updated_history.push(ChatMessage::assistant(&fallback));
     Ok((
-        make_outcome(fallback, tools_used, &total_usage, security_hold),
+        make_outcome(
+            fallback,
+            tools_used,
+            &total_usage,
+            security_hold,
+            model_resolution,
+        ),
         updated_history,
     ))
 }
@@ -403,7 +437,7 @@ async fn review_boundary_crossing(
 
     let preview = artifact_preview(source_path, 2000);
 
-    let mut decision = if stage == "in" || stage == "work" {
+    let mut decision = if stage == "in" {
         reviewer
             .review_ingress(
                 IntegrityTier::Untrusted,
@@ -487,6 +521,12 @@ async fn review_boundary_crossing(
             )))
         }
         SecurityVerdict::RequireZarApproval => {
+            reviewer.ensure_artifact_target_meta(
+                source_path,
+                target_path,
+                stage,
+                &decision.reason,
+            )?;
             let pending = reviewer.hold_artifact_for_zar(source_path, &decision.reason)?;
             merge_hold(
                 security_hold,
@@ -756,7 +796,7 @@ async fn force_finalize_without_tools(
     updated_history: &mut Vec<ChatMessage>,
     total_usage: &mut LlmUsage,
     reason: &str,
-) -> Result<String, String> {
+) -> Result<(String, ModelResolutionMeta), String> {
     let nudge = ChatMessage::user(&format!(
         "Stop using tools. {}. Provide your best final response now, with no tool calls.",
         reason
@@ -764,7 +804,7 @@ async fn force_finalize_without_tools(
     messages.push(nudge.clone());
     updated_history.push(nudge);
 
-    let (result, usage) = llm.chat(messages, &[]).await.map_err(|e| e.to_string())?;
+    let (result, usage, model_meta) = llm.chat(messages, &[]).await.map_err(|e| e.to_string())?;
     total_usage.prompt_tokens += usage.prompt_tokens;
     total_usage.completion_tokens += usage.completion_tokens;
 
@@ -781,7 +821,7 @@ async fn force_finalize_without_tools(
             .unwrap_or_else(|| FINALIZE_FALLBACK_TEXT.to_string()),
     };
 
-    Ok(content)
+    Ok((content, model_meta))
 }
 
 fn make_outcome(
@@ -789,6 +829,7 @@ fn make_outcome(
     tools_used: Vec<String>,
     usage: &LlmUsage,
     security_hold: Option<SecurityHold>,
+    model_resolution: Option<ModelResolutionMeta>,
 ) -> TurnOutcome {
     TurnOutcome {
         response,
@@ -796,6 +837,7 @@ fn make_outcome(
         prompt_tokens: usage.prompt_tokens,
         completion_tokens: usage.completion_tokens,
         security_hold,
+        model_resolution,
     }
 }
 

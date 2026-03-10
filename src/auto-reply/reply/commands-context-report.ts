@@ -5,6 +5,7 @@ import {
 } from "../../agents/pi-embedded-helpers.js";
 import { buildSystemPromptReport } from "../../agents/system-prompt-report.js";
 import type { SessionSystemPromptReport } from "../../config/sessions/types.js";
+import { attachStartupIdentityContract } from "../../vericore/startup-identity.js";
 import type { ReplyPayload } from "../types.js";
 import { resolveCommandsSystemPromptBundle } from "./commands-system-prompt.js";
 import type { HandleCommandsParams } from "./commands-types.js";
@@ -55,23 +56,25 @@ async function resolveContextReport(
   const { systemPrompt, tools, skillsPrompt, bootstrapFiles, injectedFiles, sandboxRuntime } =
     await resolveCommandsSystemPromptBundle(params);
 
-  return buildSystemPromptReport({
-    source: "estimate",
-    generatedAt: Date.now(),
-    sessionId: params.sessionEntry?.sessionId,
-    sessionKey: params.sessionKey,
-    provider: params.provider,
-    model: params.model,
-    workspaceDir: params.workspaceDir,
-    bootstrapMaxChars,
-    bootstrapTotalMaxChars,
-    sandbox: { mode: sandboxRuntime.mode, sandboxed: sandboxRuntime.sandboxed },
-    systemPrompt,
-    bootstrapFiles,
-    injectedFiles,
-    skillsPrompt,
-    tools,
-  });
+  return await attachStartupIdentityContract(
+    buildSystemPromptReport({
+      source: "estimate",
+      generatedAt: Date.now(),
+      sessionId: params.sessionEntry?.sessionId,
+      sessionKey: params.sessionKey,
+      provider: params.provider,
+      model: params.model,
+      workspaceDir: params.workspaceDir,
+      bootstrapMaxChars,
+      bootstrapTotalMaxChars,
+      sandbox: { mode: sandboxRuntime.mode, sandboxed: sandboxRuntime.sandboxed },
+      systemPrompt,
+      bootstrapFiles,
+      injectedFiles,
+      skillsPrompt,
+      tools,
+    }),
+  );
 }
 
 export async function buildContextReply(params: HandleCommandsParams): Promise<ReplyPayload> {
@@ -117,11 +120,28 @@ export async function buildContextReply(params: HandleCommandsParams): Promise<R
   }
 
   const fileLines = report.injectedWorkspaceFiles.map((f) => {
-    const status = f.missing ? "MISSING" : f.truncated ? "TRUNCATED" : "OK";
+    const status = f.missing
+      ? "MISSING"
+      : f.injected === false
+        ? "SKIPPED"
+        : f.truncated
+          ? "TRUNCATED"
+          : "OK";
     const raw = f.missing ? "0" : formatCharsAndTokens(f.rawChars);
     const injected = f.missing ? "0" : formatCharsAndTokens(f.injectedChars);
     return `- ${f.name}: ${status} | raw ${raw} | injected ${injected}`;
   });
+
+  const startupIdentityObserved = report.startupIdentityObserved;
+  const startupIdentityObservedLine = startupIdentityObserved
+    ? `Startup identity (observed): AGENTS available=${startupIdentityObserved.agents_available} injected=${startupIdentityObserved.agents_injected}; SOUL available=${startupIdentityObserved.soul_available} injected=${startupIdentityObserved.soul_injected}`
+    : null;
+  const startupIdentityContract = report.startupIdentityContract;
+  const startupIdentityContractLine = startupIdentityContract
+    ? startupIdentityContract.checked
+      ? `Startup identity (VeriCore): ${startupIdentityContract.contract_ok ? "verified" : "FAILED"}`
+      : `Startup identity (VeriCore): unavailable${startupIdentityContract.error ? ` (${startupIdentityContract.error})` : ""}`
+    : null;
 
   const sandboxLine = `Sandbox: mode=${report.sandbox?.mode ?? "unknown"} sandboxed=${report.sandbox?.sandboxed ?? false}`;
   const toolSchemaLine = `Tool schemas (JSON): ${formatCharsAndTokens(report.tools.schemaChars)} (counts toward context; not shown as text)`;
@@ -200,6 +220,8 @@ export async function buildContextReply(params: HandleCommandsParams): Promise<R
     `Bootstrap max/total: ${bootstrapTotalLabel}`,
     sandboxLine,
     systemPromptLine,
+    ...(startupIdentityObservedLine ? [startupIdentityObservedLine] : []),
+    ...(startupIdentityContractLine ? [startupIdentityContractLine] : []),
     ...(bootstrapWarningLines.length ? ["", ...bootstrapWarningLines] : []),
     "",
     "Injected workspace files:",

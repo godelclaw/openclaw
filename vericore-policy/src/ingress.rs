@@ -1,7 +1,7 @@
 //! Ingress integrity decisions over normalized inputs.
 
-use vstd::prelude::*;
 use crate::tiers::IntegrityTier;
+use vstd::prelude::*;
 
 verus! {
 
@@ -119,36 +119,69 @@ mod tests {
 
     #[test]
     fn mindlock_always_allowed() {
-        for integrity in [IntegrityTier::Untrusted, IntegrityTier::Reviewed, IntegrityTier::Trusted] {
+        for integrity in [
+            IntegrityTier::Untrusted,
+            IntegrityTier::Reviewed,
+            IntegrityTier::Trusted,
+        ] {
             assert!(ingress_allows_write(integrity, WriteTargetClass::Mindlock));
         }
     }
 
     #[test]
     fn private_only_trusted() {
-        assert!(!ingress_allows_write(IntegrityTier::Untrusted, WriteTargetClass::Private));
-        assert!(!ingress_allows_write(IntegrityTier::Reviewed, WriteTargetClass::Private));
-        assert!(ingress_allows_write(IntegrityTier::Trusted, WriteTargetClass::Private));
+        assert!(!ingress_allows_write(
+            IntegrityTier::Untrusted,
+            WriteTargetClass::Private
+        ));
+        assert!(!ingress_allows_write(
+            IntegrityTier::Reviewed,
+            WriteTargetClass::Private
+        ));
+        assert!(ingress_allows_write(
+            IntegrityTier::Trusted,
+            WriteTargetClass::Private
+        ));
     }
 
     #[test]
     fn sensitive_config_only_trusted() {
-        assert!(!ingress_allows_write(IntegrityTier::Untrusted, WriteTargetClass::SensitiveConfig));
-        assert!(!ingress_allows_write(IntegrityTier::Reviewed, WriteTargetClass::SensitiveConfig));
-        assert!(ingress_allows_write(IntegrityTier::Trusted, WriteTargetClass::SensitiveConfig));
+        assert!(!ingress_allows_write(
+            IntegrityTier::Untrusted,
+            WriteTargetClass::SensitiveConfig
+        ));
+        assert!(!ingress_allows_write(
+            IntegrityTier::Reviewed,
+            WriteTargetClass::SensitiveConfig
+        ));
+        assert!(ingress_allows_write(
+            IntegrityTier::Trusted,
+            WriteTargetClass::SensitiveConfig
+        ));
     }
 
     #[test]
     fn other_always_allowed() {
-        for integrity in [IntegrityTier::Untrusted, IntegrityTier::Reviewed, IntegrityTier::Trusted] {
+        for integrity in [
+            IntegrityTier::Untrusted,
+            IntegrityTier::Reviewed,
+            IntegrityTier::Trusted,
+        ] {
             assert!(ingress_allows_write(integrity, WriteTargetClass::Other));
         }
     }
 
     #[test]
     fn unresolved_always_denied() {
-        for integrity in [IntegrityTier::Untrusted, IntegrityTier::Reviewed, IntegrityTier::Trusted] {
-            assert!(!ingress_allows_write(integrity, WriteTargetClass::Unresolved));
+        for integrity in [
+            IntegrityTier::Untrusted,
+            IntegrityTier::Reviewed,
+            IntegrityTier::Trusted,
+        ] {
+            assert!(!ingress_allows_write(
+                integrity,
+                WriteTargetClass::Unresolved
+            ));
         }
     }
 }

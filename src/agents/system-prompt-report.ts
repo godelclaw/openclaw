@@ -2,7 +2,11 @@ import type { AgentTool } from "@mariozechner/pi-agent-core";
 import type { SessionSystemPromptReport } from "../config/sessions/types.js";
 import { buildBootstrapInjectionStats } from "./bootstrap-budget.js";
 import type { EmbeddedContextFile } from "./pi-embedded-helpers.js";
-import type { WorkspaceBootstrapFile } from "./workspace.js";
+import {
+  DEFAULT_AGENTS_FILENAME,
+  DEFAULT_SOUL_FILENAME,
+  type WorkspaceBootstrapFile,
+} from "./workspace.js";
 
 function extractBetween(
   input: string,
@@ -77,6 +81,26 @@ function extractToolListText(systemPrompt: string): string {
   return extracted.text.replace(markerA, "").trim();
 }
 
+export function resolveStartupIdentityObserved(
+  report: Pick<SessionSystemPromptReport, "injectedWorkspaceFiles">,
+): NonNullable<SessionSystemPromptReport["startupIdentityObserved"]> {
+  const agents = report.injectedWorkspaceFiles.find(
+    (file) => file.name === DEFAULT_AGENTS_FILENAME,
+  );
+  const soul = report.injectedWorkspaceFiles.find((file) => file.name === DEFAULT_SOUL_FILENAME);
+
+  const wasInjected = (
+    file: { missing: boolean; injected?: boolean; injectedChars: number } | undefined,
+  ) => !!file && !file.missing && (file.injected ?? file.injectedChars > 0);
+
+  return {
+    agents_available: !!agents && !agents.missing,
+    agents_injected: wasInjected(agents),
+    soul_available: !!soul && !soul.missing,
+    soul_injected: wasInjected(soul),
+  };
+}
+
 export function buildSystemPromptReport(params: {
   source: SessionSystemPromptReport["source"];
   generatedAt: number;
@@ -107,6 +131,10 @@ export function buildSystemPromptReport(params: {
   const toolsEntries = buildToolsEntries(params.tools);
   const toolsSchemaChars = toolsEntries.reduce((sum, t) => sum + (t.schemaChars ?? 0), 0);
   const skillsEntries = parseSkillBlocks(params.skillsPrompt);
+  const injectedWorkspaceFiles = buildBootstrapInjectionStats({
+    bootstrapFiles: params.bootstrapFiles,
+    injectedFiles: params.injectedFiles,
+  });
 
   return {
     source: params.source,
@@ -125,10 +153,8 @@ export function buildSystemPromptReport(params: {
       projectContextChars,
       nonProjectContextChars: Math.max(0, systemPrompt.length - projectContextChars),
     },
-    injectedWorkspaceFiles: buildBootstrapInjectionStats({
-      bootstrapFiles: params.bootstrapFiles,
-      injectedFiles: params.injectedFiles,
-    }),
+    injectedWorkspaceFiles,
+    startupIdentityObserved: resolveStartupIdentityObserved({ injectedWorkspaceFiles }),
     skills: {
       promptChars: params.skillsPrompt.length,
       entries: skillsEntries,

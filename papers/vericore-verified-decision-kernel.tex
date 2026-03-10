@@ -33,13 +33,13 @@
 
 \title{VeriCore: A Verified Decision Kernel for Context-Integrity and Mindlock Boundary Control}
 \author{GodelClaw / VeriCore Notes}
-\date{March 7, 2026}
+\date{March 10, 2026}
 
 \begin{document}
 \maketitle
 
 \begin{abstract}
-We describe the current VeriCore architecture for an autonomous agent, Oruzi, running on OpenClaw with a Rust decision layer. The central design goal is to preserve agent capability while enforcing a small set of non-negotiable integrity properties: context provenance, no silent privilege escalation, and explicit auditability of boundary crossings. The architecture separates deterministic policy decisions from unverified I/O and language-model behavior. The deterministic slice is being migrated into a dedicated crate, \texttt{vericore-policy}, so that the same executable functions used at runtime can be checked with Verus. We outline the current trust model, the mindlock staging protocol, the ingress integrity kernel, and the remaining trust boundary at I/O source authenticity.
+We describe the current VeriCore architecture for an autonomous agent, Oruzi, running in a single-driver configuration on OpenClaw with a Rust decision layer. The central design goal is to preserve agent capability while enforcing a small set of non-negotiable integrity properties: context provenance, no silent privilege escalation, and explicit auditability of boundary crossings. The architecture separates deterministic policy decisions from unverified I/O, transport routing, and language-model behavior. The proof story is intentionally layered: a small runtime kernel is called directly from Rust, boundary validators check TypeScript-reported facts at the Rust seam, and additional Verus modules remain reference specs whose correspondence to the TS runtime is enforced by tests and review rather than by the prover. We outline the current trust model, the mindlock staging protocol, the LLM and tool-broker seams, and the remaining gaps at transport authenticity and runtime-reporting drift.
 \end{abstract}
 
 \section{Introduction}
@@ -56,12 +56,12 @@ This paper documents the current structure and explains which parts are already 
 \section{System Overview}
 Oruzi runs on an OpenClaw gateway with a Rust daemon, VeriCore, as the policy and orchestration layer. The operational split is:
 \begin{itemize}[leftmargin=1.5em]
-\item \textbf{OpenClaw (TypeScript)}: transport integration, session handling, Telegram UI, model resolution, auth profiles, provider routing, and the completions bridge.
-\item \textbf{VeriCore (Rust)}: deterministic policy checks, audit surfaces, mindlock operations, reviewer orchestration, and the driver turn loop. VeriCore has \emph{no} model, provider, or auth configuration---all LLM calls are delegated to OpenClaw via a Unix socket bridge.
-\item \textbf{vericore-policy}: extracted pure decision kernel intended to be Verus-verified and called by VeriCore directly.
+\item \textbf{OpenClaw (TypeScript)}: transport integration, session handling, Telegram UI, model resolution, auth profiles, provider routing, and capability brokering for both the completions bridge and the MCP tool broker.
+\item \textbf{VeriCore (Rust)}: deterministic policy checks, audit surfaces, mindlock operations, reviewer orchestration, and the single driver turn loop. VeriCore has \emph{no} model, provider, or auth configuration---all LLM calls are delegated to OpenClaw via a Unix socket bridge, and non-native MCP tools are delegated through a separate Unix socket tool broker.
+\item \textbf{vericore-policy}: extracted pure decision kernel plus boundary validators, intended to be Verus-verified and called by VeriCore directly.
 \end{itemize}
 
-At a high level, a message or event becomes a \emph{stimulus}. VeriCore assigns the stimulus a channel, maps that channel to a context tier, derives an integrity tier, and then gates sensitive actions with deterministic rules before execution. When the driver loop needs an LLM completion, the Rust \texttt{GatewayLlmClient} sends a length-prefixed JSON request over a Unix socket to the TypeScript completions bridge, which runs the request through OpenClaw's full model resolution and fallback chain.
+At a high level, a message or event becomes a \emph{stimulus}. VeriCore assigns the stimulus a channel, maps that channel to a context tier, derives an integrity tier, and then gates sensitive actions with deterministic rules before execution. When the driver loop needs an LLM completion, the Rust \texttt{GatewayLlmClient} sends a length-prefixed JSON request over a Unix socket to the TypeScript completions bridge, which runs the request through OpenClaw's full model resolution and fallback chain. When the driver loop needs tools beyond Rust's native file/exec set, it queries a second Unix socket broker in OpenClaw, which resolves a per-agent MCP tool catalog and executes approved calls through OpenClaw's existing hook path.
 
 \section{Context and Integrity Model}
 The architecture uses two related lattices:
@@ -174,6 +174,11 @@ The key architectural invariant is that \textbf{Rust has zero model, provider, o
 
 Both the driver turn LLM call and the security reviewer LLM call use the same bridge. The bridge distinguishes them via \texttt{call\_kind} (for logging) and \texttt{prompt\_mode} (for context), but both resolve through the same model/auth stack.
 
+\subsection{Tool Broker and Capability Parity}
+The earlier split architecture kept OpenClaw as the real driver whenever MCP or subscription-backed capabilities were needed. The current deployment removes that steady-state split. VeriCore owns the driver loop; OpenClaw exposes capabilities through a second Unix socket, the tool broker. Rust requests a per-agent tool catalog, receives stable capability identifiers for MCP-backed tools, and executes approved calls through OpenClaw's existing tool hook path. This preserves subscription/auth handling and MCP lifecycle in TypeScript while keeping policy authority in Rust.
+
+The verified \texttt{tool\_broker.rs} and \texttt{tool\_policy.rs} modules are intentionally modest. They specify request/response well-formedness, parsed capability-ID shape, native-name collision guards, and allowlist semantics. They do \emph{not} prove raw JSON parsing, exact string formatting of runtime capability IDs, or full equivalence with OpenClaw's dynamic tool-schema handling.
+
 \subsection{Fallback Notifications}
 When the bridge falls back to a different model or provider, the operator is notified via Telegram DM. This is not optional observability---it is an essential feature, because silent provider changes can alter billing, capability, and safety characteristics. The notification path uses the same \texttt{routeReply} mechanism as normal Telegram messages, with a 5-minute deduplication window per fallback transition.
 
@@ -186,25 +191,33 @@ The bridge implementation exposed several verification gaps worth documenting:
 \item Legacy Rust config fields (\texttt{api\_base}, \texttt{api\_key\_env}, \texttt{model}) caused a silent routing bug: VeriCore appeared to work but was hitting OpenRouter directly (returning HTTP 402) instead of going through the bridge. The fix was to purge these fields entirely.
 \item A string comparison for fallback detection (\texttt{configured\_model != resolved\_model}) produced false positives on every clean run because the two fields use different naming conventions. The fix was to gate on the boolean \texttt{fallback\_used} field instead.
 \item The security reviewer path through the bridge has not yet been E2E tested---it is a known gap.
+\item Operational tooling can still drift from the live state directory. In the current deployment, CLI health/status probes must target the active \texttt{.BGIseed-state} tree explicitly, and the current \texttt{gateway health} report can still mislabel Telegram as not running even when the provider is live. These are reporting and tooling issues outside the proof boundary.
 \end{itemize}
 
 \section{What Is Verified Today}
-The crate \texttt{vericore-policy} contains verified policy logic at two levels. As of March 2026, Verus verifies 116 functions with 0 errors across 10 modules.
+The crate \texttt{vericore-policy} currently verifies 162 functions with 0 errors across 14 modules. The honest split is now three-way: runtime-called kernel predicates, runtime-called boundary validators, and verified reference specs.
 
 \subsection{Verified Runtime Kernel}
 The following modules are production-wired: the same functions that Verus checks are the ones \texttt{vericore-core} calls for live policy decisions.
 \begin{itemize}[leftmargin=1.5em]
 \item tier definitions and flow-label algebra (\texttt{tiers.rs}): context rank, integrity rank, flow-to, label join. Proved properties include join idempotence, commutativity, associativity, and the duality between \texttt{can\_flow\_to} and \texttt{can\_read}.
 \item default channel-to-context and context-to-integrity mapping (\texttt{channels.rs}): called by \texttt{GatePolicy::context\_for\_channel} and \texttt{integrity\_for\_channel} in production. Proved: public channels map to \texttt{Untrusted}, private channels map to \texttt{Trusted}, no channel maps above \texttt{Private}, and the integrity mapping is injective.
-\item ingress decision predicates (\texttt{ingress.rs}): \texttt{ingress\_allows\_exec} and \texttt{ingress\_allows\_write}, called from \texttt{check\_ingress\_integrity} in production. Proved: \texttt{Reviewed} cannot exec, \texttt{Trusted} has full capability, write permissions are monotone in integrity.
+\item ingress decision predicates (\texttt{ingress.rs}): \texttt{ingress\_allows\_exec} and \texttt{ingress\_allows\_write}, called from \texttt{check\_ingress\_integrity} in production. Proved: \texttt{Reviewed} cannot exec, \texttt{Trusted} has full capability, and write permissions are monotone in integrity.
 \end{itemize}
 
+\subsection{Verified Runtime Boundary Validators}
+Two additional verified modules are now called directly by the runtime, but they validate facts reported by TypeScript rather than replacing TypeScript logic.
+
+\paragraph{Session model policy} (\texttt{session\_model\_policy.rs}). Called from the Rust LLM bridge client after each completion response. Proves metadata completeness, fallback visibility, provider-change flag consistency, allowlist enforcement, and override consistency. This is a boundary contract: it checks whether the bridge response is coherent enough for Rust to trust. It does \emph{not} prove that the TS runtime selected the semantically correct model end to end.
+
+\paragraph{Startup context identity} (\texttt{startup\_context\_policy.rs}). Called through \texttt{startup\_identity\_validate} and surfaced in the startup/context report. Proves that AGENTS and SOUL availability/injection booleans combine into a simple contract. This is again a boundary validator over TS-observed facts, not an independent reconstruction of prompt assembly.
+
 \subsection{Verified Reference Specs}
-Seven additional modules provide proved reference specs. These are not runtime-called kernels; correspondence with runtime behavior is established by tests, not by the prover. Their value is as regression guards and precise invariant statements.
+Nine additional modules provide proved reference specs. These are not the authoritative runtime kernels; correspondence with runtime behavior is established by tests, runtime checks, and review.
 
-\paragraph{Model resolution} (\texttt{model\_resolution.rs}). Proves candidate-list policy properties over an abstract \texttt{Seq<ModelRef>}: primary-first ordering, no duplicates, cross-provider gating, and provider stability. Also provides executable decision functions for resolution metadata.
+\paragraph{Model resolution} (\texttt{model\_resolution.rs}). Proves candidate-list policy properties over an abstract \texttt{Seq<ModelRef>}: primary-first ordering, no duplicates, cross-provider gating, and alert severity semantics.
 
-\paragraph{LLM bridge contract} (\texttt{llm\_bridge.rs}). Specifies the completions bridge interface: request well-formedness, response usability, call-kind/prompt-mode consistency (security review must use reviewer mode), and session-key requirements (driver turns require a session key).
+\paragraph{LLM bridge contract} (\texttt{llm\_bridge.rs}). Specifies the completions bridge interface: request well-formedness, response usability, call-kind/prompt-mode consistency, and session-key requirements.
 
 \paragraph{Mindlock state machine} (\texttt{mindlock.rs}). The full transition relation, staging/terminal classification, source validation, and cleanup eligibility (see Section~5).
 
@@ -214,17 +227,22 @@ Seven additional modules provide proved reference specs. These are not runtime-c
 
 \paragraph{Gate chain} (\texttt{gate\_chain.rs}). The runtime gate chain is a strict conjunction of six boolean gates (schedule, action kind, tool ID, skill ID, ingress integrity, primitive action). Proved: any single deny breaks the chain, and the chain is monotone.
 
-\paragraph{Cross-module compositions} (\texttt{compositions.rs}). Six proofs chaining \texttt{channels} $\to$ \texttt{tiers} $\to$ \texttt{ingress}: public Telegram/API/Moltbook channels cannot execute commands, untrusted channels cannot write to private targets, and private channels have full capability.
+\paragraph{Tool broker contract} (\texttt{tool\_broker.rs}). Specifies broker request/response well-formedness and parsed capability-ID shape. This is explicitly a semantic parsed-field contract, not a raw JSON or string-parser proof.
+
+\paragraph{Tool authorization policy} (\texttt{tool\_policy.rs}). Specifies allowlist authorization, native-name collision denial for brokered tools, and origin-irrelevant gating for non-colliding tools.
+
+\paragraph{Cross-module compositions} (\texttt{compositions.rs}). Proofs chaining \texttt{channels} $\to$ \texttt{tiers} $\to$ \texttt{ingress} and \texttt{tool\_policy} $\to$ \texttt{gate\_chain}. The current model-boundary lemma in this module is only a regression guard for the Rust validator; it should not be read as a deep proof that the TS model-selection pipeline is correct.
 
 \subsection{The Distinction}
 This separation matters and should be maintained honestly:
 \begin{itemize}[leftmargin=1.5em]
-\item \textbf{Verified runtime kernel}: Verus-checked functions that production calls directly. A bug in these functions would be caught by the prover before deployment.
-\item \textbf{Verified reference spec}: Verus-checked invariants that define what the runtime \emph{should} satisfy. Correspondence between spec and runtime is established by tests, not by the prover.
+\item \textbf{Verified runtime kernel}: Verus-checked pure decision functions that production calls directly for live allow/deny decisions.
+\item \textbf{Verified runtime boundary validator}: Verus-checked pure validators that production calls on TS-reported facts at the Rust seam.
+\item \textbf{Verified reference spec}: Verus-checked invariants that define what adjacent runtime behavior \emph{should} satisfy. Correspondence is established by tests, runtime checks, and review, not by the prover alone.
 \item \textbf{Tested I/O and runtime behavior}: integration tests covering transport, filesystem, async races, and service availability. Verus does not and should not cover these.
 \end{itemize}
 
-\textbf{Remaining drift surface:} \texttt{vericore-core} still has its own copies of the \texttt{Channel}, \texttt{ContextTier}, and \texttt{IntegrityTier} enums, with total-match conversion helpers bridging them to the verified crate. This duplication is acceptable as bootstrap scaffolding but should eventually be consolidated so that verified types are used directly.
+\textbf{Remaining drift surface:} \texttt{vericore-core} still has its own copies of some enums and wire-level representations, with conversion helpers bridging them to the verified crate. The larger remaining drift surface is at the TS-to-Rust envelope and operator-facing routing/reporting seams, not inside the small pure kernel modules.
 
 \section{Proof Boundary}
 The current proof boundary covers all deterministic policy decision surfaces:
@@ -232,21 +250,25 @@ The current proof boundary covers all deterministic policy decision surfaces:
 \item label algebra over secrecy and integrity (join lattice properties, flow/read duality),
 \item channel-to-context and context-to-integrity mapping (injectivity, ceiling bounds),
 \item ingress allow/deny decisions over normalized target classes (monotonicity, full capability),
+\item session-model boundary validation over bridge-reported metadata (completeness, fallback visibility, override consistency, allowlist enforcement),
+\item startup-identity boundary validation over AGENTS/SOUL availability and injection facts,
 \item mindlock state machine (terminal states, valid transitions, source validation, cleanup eligibility),
 \item receipt and human-approval conditions for promotion (tamper detection, at-least-one-auth),
 \item egress flow control (transitivity, private-to-public denial, review triggers),
 \item gate chain conjunction (monotonicity, any-deny-breaks-chain),
-\item bridge contract (call-kind/prompt-mode consistency, session-key requirements),
-\item cross-module composition proofs (channel $\to$ ingress $\to$ capability).
+\item tool broker and tool-gate contracts (parsed-field request/response invariants, native-shadow denial, allowlist semantics),
+\item bridge contract (call-kind/prompt-mode consistency, session-key requirements), and
+\item cross-module composition proofs for ingress/tool-gate chains.
 \end{enumerate}
 
 The following are explicitly \emph{outside} the proof boundary:
 \begin{itemize}[leftmargin=1.5em]
-\item Telegram UX,
+\item Telegram and webchat UX,
 \item async daemon behavior,
 \item filesystem race handling in detail,
 \item reviewer prompt quality,
 \item RAG relevance,
+\item TS runtime state-dir selection and health-report accuracy,
 \item social or stylistic policy guidance.
 \end{itemize}
 
@@ -279,35 +301,33 @@ The crate split is therefore pragmatic:
 This preserves runtime practicality while shrinking the gap between ``proved model'' and ``running system''.
 
 \section{Next Steps}
-The correct near-term sequence is:
+The correct near-term sequence is now:
 \begin{enumerate}[label=\arabic*.]
 \item \textbf{(done)} ingress predicates Verus-verified and production-wired,
 \item \textbf{(done)} default channel/context/integrity mapping verified and production-wired,
-\item \textbf{(done, reference spec)} model resolution candidate-list policy verified,
-\item \textbf{(done)} completions bridge with fallback notifications and local E2E test harness,
-\item \textbf{(done, reference spec)} mindlock state machine, receipt authorization, egress flow control, gate chain, bridge contract, and cross-module compositions verified,
-\item \textbf{(done)} mindlock runtime hardening: source validation guard with full path prefix check; 30-day rejected cleanup via systemd timer,
-\item E2E test the security reviewer path through the completions bridge (known gap),
-\item wire \texttt{model\_resolution} into Rust runtime (currently reference-only; TS is authoritative),
-\item wire \texttt{llm\_bridge} consistency checks as debug assertions,
+\item \textbf{(done)} single-driver completions bridge wired so Rust owns the turn loop while OpenClaw owns model resolution and auth,
+\item \textbf{(done)} MCP tool broker wired so Rust can call brokered tools while OpenClaw owns MCP runtime and hooks,
+\item \textbf{(done)} runtime boundary validators for session-model metadata and startup identity,
+\item E2E test the security reviewer path through the completions bridge (still a known gap),
 \item harden the gateway-to-daemon authenticity boundary,
-\item consolidate enum types so production uses verified types directly.
+\item strengthen TS$\leftrightarrow$Rust correspondence tests for model selection, tool broker behavior, and operator-surface routing,
+\item reduce operator/reporting drift (for example, health-report accuracy and non-Telegram private parent surfaces), and
+\item consolidate enum types and capability identifiers so production uses verified representations more directly.
 \end{enumerate}
 
 Testing is still required. Verus does not replace integration tests for socket boundaries, filesystem behavior, async races, or service availability. The practical split is:
 \begin{itemize}[leftmargin=1.5em]
 \item \textbf{Verus (runtime kernel)}: pure policy functions called by production,
-\item \textbf{Verus (reference spec)}: proved invariants mirrored by runtime tests,
+\item \textbf{Verus (runtime boundary validators)}: pure validators called on TS-reported facts at the Rust seam,
+\item \textbf{Verus (reference spec)}: proved invariants mirrored by runtime tests and review, and
 \item \textbf{tests}: I/O, operational integration, and spec--runtime correspondence.
 \end{itemize}
 
 \section{Conclusion}
-VeriCore is now past the point where detached proof sketches alone are the main value. 116 functions are verified with 0 errors across 10 modules spanning three runtime-wired kernel modules, seven reference spec modules, and cross-module composition proofs.
+VeriCore is now past the point where detached proof sketches alone are the main value. As of March 10, 2026, \texttt{vericore-policy} verifies 162 functions with 0 errors across 14 modules spanning a runtime-called kernel, runtime-called boundary validators, and verified reference specs.
 
-For the runtime-called kernel (tiers, channels, ingress), the verified predicates are the authoritative runtime logic. For the reference specs (model resolution, mindlock, receipt, egress, gate chain, bridge contract), the invariants are stated precisely and proved consistent, serving as regression guards and precise targets for future runtime wiring.
+For the runtime kernel (tiers, channels, ingress), the verified predicates are authoritative runtime logic. For the boundary validators (session-model metadata and startup identity), the verified predicates are authoritative checks on TS-reported facts at the Rust seam. For the reference specs (model resolution, mindlock, receipt, egress, gate chain, bridge contracts, tool broker, tool policy, and compositions), the invariants are stated precisely and proved consistent, serving as regression guards and precise targets for future runtime wiring.
 
-The mindlock state machine and receipt authorization---previously identified as next targets---are now fully specified and verified. Runtime enforcement has been strengthened: \texttt{move\_existing\_artifact()} validates source paths against the configured mindlock root, and rejected artifacts are cleaned up on a 30-day retention schedule.
-
-That combination---verified deterministic policy for the runtime kernel, verified reference specs for adjacent surfaces, runtime enforcement of verified invariants, and tested transport and operational boundaries---is the strongest realistic path for this architecture.
+The honest trust story is therefore layered rather than absolute. Formal verification covers the deterministic kernel and some key seam validators. Tests and review still carry the transport, OpenClaw runtime, MCP lifecycle, UX routing, and other operational boundaries. That combination---verified deterministic policy for the runtime kernel, verified boundary contracts for the Rust/TS seam, verified reference specs for adjacent surfaces, and tested transport and operational boundaries---is the strongest realistic path for this architecture.
 
 \end{document}

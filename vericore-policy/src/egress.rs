@@ -5,8 +5,8 @@
 //! Maps to the runtime's `can_flow_to` check in `policy.rs::check_action()`
 //! for Respond actions.
 
-use vstd::prelude::*;
 use crate::tiers::ContextTier;
+use vstd::prelude::*;
 
 verus! {
 
@@ -142,8 +142,20 @@ mod tests {
 
     #[test]
     fn review_triggered_on_cross_tier() {
-        assert!(needs_security_review(ContextTier::Private, ContextTier::Public, true));
-        assert!(!needs_security_review(ContextTier::Private, ContextTier::Public, false));
-        assert!(!needs_security_review(ContextTier::Public, ContextTier::Public, true));
+        assert!(needs_security_review(
+            ContextTier::Private,
+            ContextTier::Public,
+            true
+        ));
+        assert!(!needs_security_review(
+            ContextTier::Private,
+            ContextTier::Public,
+            false
+        ));
+        assert!(!needs_security_review(
+            ContextTier::Public,
+            ContextTier::Public,
+            true
+        ));
     }
 }

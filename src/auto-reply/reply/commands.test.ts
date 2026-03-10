@@ -104,6 +104,28 @@ vi.mock("../../gateway/call.js", () => ({
   callGateway: (opts: unknown) => callGatewayMock(opts),
 }));
 
+const runVeriCoreMindlockPendingMock = vi.hoisted(() => vi.fn());
+const runVeriCoreMindlockStatusMock = vi.hoisted(() => vi.fn());
+const runVeriCoreMindlockListMock = vi.hoisted(() => vi.fn());
+const runVeriCoreMindlockViewMock = vi.hoisted(() => vi.fn());
+const runVeriCoreMindlockApproveMock = vi.hoisted(() => vi.fn());
+const runVeriCoreMindlockRejectMock = vi.hoisted(() => vi.fn());
+
+vi.mock("../../vericore/impetus.js", async () => {
+  const actual = await vi.importActual<typeof import("../../vericore/impetus.js")>(
+    "../../vericore/impetus.js",
+  );
+  return {
+    ...actual,
+    runVeriCoreMindlockPending: (...args: unknown[]) => runVeriCoreMindlockPendingMock(...args),
+    runVeriCoreMindlockStatus: (...args: unknown[]) => runVeriCoreMindlockStatusMock(...args),
+    runVeriCoreMindlockList: (...args: unknown[]) => runVeriCoreMindlockListMock(...args),
+    runVeriCoreMindlockView: (...args: unknown[]) => runVeriCoreMindlockViewMock(...args),
+    runVeriCoreMindlockApprove: (...args: unknown[]) => runVeriCoreMindlockApproveMock(...args),
+    runVeriCoreMindlockReject: (...args: unknown[]) => runVeriCoreMindlockRejectMock(...args),
+  };
+});
+
 type ResetAcpSessionInPlaceResult = { ok: true } | { ok: false; skipped?: boolean; error?: string };
 
 const resetAcpSessionInPlaceMock = vi.hoisted(() =>
@@ -356,6 +378,76 @@ describe("/approve command", () => {
         }),
       );
     }
+  });
+});
+
+describe("mindlock commands", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("handles /review via generic command pipeline", async () => {
+    const cfg = {
+      commands: { text: true },
+      channels: { whatsapp: { allowFrom: ["*"] } },
+    } as OpenClawConfig;
+    const params = buildParams("/review", cfg, {
+      Provider: "webchat",
+      Surface: "webchat",
+    });
+
+    runVeriCoreMindlockPendingMock.mockResolvedValue({
+      mindlock_dir: "/mindlock",
+      pending_dir: "/mindlock/pending-zar",
+      count: 0,
+      items: [],
+    });
+
+    const result = await handleCommands(params);
+    expect(result.shouldContinue).toBe(false);
+    expect(result.reply?.text).toContain("Mindlock pending review queue is empty.");
+    expect(runVeriCoreMindlockPendingMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders /view results via generic command pipeline", async () => {
+    const cfg = {
+      commands: { text: true },
+      channels: { whatsapp: { allowFrom: ["*"] } },
+    } as OpenClawConfig;
+    const params = buildParams("/view draft-1", cfg, {
+      Provider: "webchat",
+      Surface: "webchat",
+    });
+
+    runVeriCoreMindlockViewMock.mockResolvedValue({
+      id: "draft-1",
+      name: "draft-1.md",
+      path: "/mindlock/pending-zar/draft-1.md",
+      stage: "pending",
+      size_bytes: 12,
+      modified_ts: 1773140000,
+      preview: "hello world",
+      preview_truncated: false,
+      preview_binary: false,
+    });
+
+    const result = await handleCommands(params);
+    expect(result.shouldContinue).toBe(false);
+    expect(result.reply?.text).toContain("Mindlock view: draft-1");
+    expect(result.reply?.text).toContain("hello world");
+  });
+
+  it("keeps mindlock commands owner-only when a sender id is present", async () => {
+    const cfg = {
+      commands: { text: true },
+      channels: { whatsapp: { allowFrom: ["*"] } },
+    } as OpenClawConfig;
+    const params = buildParams("/review", cfg, { SenderId: "peer-1" });
+
+    const result = await handleCommands(params);
+    expect(result.shouldContinue).toBe(false);
+    expect(result.reply?.text).toContain("owner-only");
+    expect(runVeriCoreMindlockPendingMock).not.toHaveBeenCalled();
   });
 });
 

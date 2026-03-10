@@ -146,9 +146,7 @@ pub fn route_stimulus(policy: &GatePolicy, input: &StimulusInput) -> StimulusRou
             eprintln!("[vericore] route_preference=gate is deprecated; treating as driver");
             RouteTarget::Driver
         }
-        RoutePreference::Off | RoutePreference::Fallback => {
-            RouteTarget::Fallback
-        }
+        RoutePreference::Off | RoutePreference::Fallback => RouteTarget::Fallback,
     };
 
     StimulusRouteDecision {

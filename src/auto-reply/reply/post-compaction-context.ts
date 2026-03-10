@@ -6,6 +6,9 @@ import type { OpenClawConfig } from "../../config/config.js";
 import { openBoundaryFile } from "../../infra/boundary-file-read.js";
 
 const MAX_CONTEXT_CHARS = 3000;
+const CRITICAL_WORKSPACE_FILES = ["AGENTS.md", "SOUL.md"] as const;
+
+type CriticalWorkspaceFile = (typeof CRITICAL_WORKSPACE_FILES)[number];
 
 function formatDateStamp(nowMs: number, timezone: string): string {
   const parts = new Intl.DateTimeFormat("en-US", {
@@ -23,9 +26,66 @@ function formatDateStamp(nowMs: number, timezone: string): string {
   return new Date(nowMs).toISOString().slice(0, 10);
 }
 
+async function readWorkspaceCriticalFile(
+  workspaceDir: string,
+  fileName: CriticalWorkspaceFile,
+): Promise<string | null> {
+  const filePath = path.join(workspaceDir, fileName);
+  try {
+    const opened = await openBoundaryFile({
+      absolutePath: filePath,
+      rootPath: workspaceDir,
+      boundaryLabel: "workspace root",
+    });
+    if (!opened.ok) {
+      return null;
+    }
+    return (() => {
+      try {
+        return fs.readFileSync(opened.fd, "utf-8");
+      } finally {
+        fs.closeSync(opened.fd);
+      }
+    })();
+  } catch {
+    return null;
+  }
+}
+
+export async function readLeanWorkspaceIdentityContext(params: {
+  workspaceDir: string;
+  maxChars?: number;
+  cfg?: OpenClawConfig;
+  nowMs?: number;
+}): Promise<string | null> {
+  const resolvedNowMs = params.nowMs ?? Date.now();
+  const timezone = resolveUserTimezone(params.cfg?.agents?.defaults?.userTimezone);
+  const dateStamp = formatDateStamp(resolvedNowMs, timezone);
+  const sections: string[] = [];
+
+  for (const fileName of CRITICAL_WORKSPACE_FILES) {
+    const content = await readWorkspaceCriticalFile(params.workspaceDir, fileName);
+    const trimmed = content?.trim();
+    if (!trimmed) {
+      continue;
+    }
+    sections.push(`## ${fileName}\n\n${trimmed.replaceAll("YYYY-MM-DD", dateStamp)}`);
+  }
+
+  if (sections.length === 0) {
+    return null;
+  }
+
+  const maxChars = params.maxChars ?? MAX_CONTEXT_CHARS;
+  const combined = sections.join("\n\n");
+  return combined.length > maxChars
+    ? combined.slice(0, maxChars) + "\n...[truncated]..."
+    : combined;
+}
+
 /**
- * Read critical sections from workspace AGENTS.md for post-compaction injection.
- * Returns formatted system event text, or null if no AGENTS.md or no relevant sections.
+ * Read lean workspace identity files for post-compaction injection.
+ * Returns formatted system event text, or null if neither AGENTS.md nor SOUL.md is readable.
  * Substitutes YYYY-MM-DD placeholders with the real date so agents read the correct
  * daily memory files instead of guessing based on training cutoff.
  */
@@ -34,60 +94,25 @@ export async function readPostCompactionContext(
   cfg?: OpenClawConfig,
   nowMs?: number,
 ): Promise<string | null> {
-  const agentsPath = path.join(workspaceDir, "AGENTS.md");
-
-  try {
-    const opened = await openBoundaryFile({
-      absolutePath: agentsPath,
-      rootPath: workspaceDir,
-      boundaryLabel: "workspace root",
-    });
-    if (!opened.ok) {
-      return null;
-    }
-    const content = (() => {
-      try {
-        return fs.readFileSync(opened.fd, "utf-8");
-      } finally {
-        fs.closeSync(opened.fd);
-      }
-    })();
-
-    // Extract "## Session Startup" and "## Red Lines" sections.
-    // Also accept legacy names "Every Session" and "Safety" for backward
-    // compatibility with older AGENTS.md templates.
-    // Each section ends at the next "## " heading or end of file
-    let sections = extractSections(content, ["Session Startup", "Red Lines"]);
-    if (sections.length === 0) {
-      sections = extractSections(content, ["Every Session", "Safety"]);
-    }
-
-    if (sections.length === 0) {
-      return null;
-    }
-
-    const resolvedNowMs = nowMs ?? Date.now();
-    const timezone = resolveUserTimezone(cfg?.agents?.defaults?.userTimezone);
-    const dateStamp = formatDateStamp(resolvedNowMs, timezone);
-    // Always append the real runtime timestamp — AGENTS.md content may itself contain
-    // "Current time:" as user-authored text, so we must not gate on that substring.
-    const { timeLine } = resolveCronStyleNow(cfg ?? {}, resolvedNowMs);
-
-    const combined = sections.join("\n\n").replaceAll("YYYY-MM-DD", dateStamp);
-    const safeContent =
-      combined.length > MAX_CONTEXT_CHARS
-        ? combined.slice(0, MAX_CONTEXT_CHARS) + "\n...[truncated]..."
-        : combined;
-
-    return (
-      "[Post-compaction context refresh]\n\n" +
-      "Session was just compacted. The conversation summary above is a hint, NOT a substitute for your startup sequence. " +
-      "Execute your Session Startup sequence now — read the required files before responding to the user.\n\n" +
-      `Critical rules from AGENTS.md:\n\n${safeContent}\n\n${timeLine}`
-    );
-  } catch {
+  const safeContent = await readLeanWorkspaceIdentityContext({
+    workspaceDir,
+    maxChars: MAX_CONTEXT_CHARS,
+    cfg,
+    nowMs,
+  });
+  if (!safeContent) {
     return null;
   }
+
+  const resolvedNowMs = nowMs ?? Date.now();
+  const { timeLine } = resolveCronStyleNow(cfg ?? {}, resolvedNowMs);
+
+  return (
+    "[Post-compaction context refresh]\n\n" +
+    "Session was just compacted. The conversation summary above is a hint, NOT a substitute for your startup sequence. " +
+    "Re-read the lean workspace identity files before responding to the user.\n\n" +
+    `Critical workspace identity files:\n\n${safeContent}\n\n${timeLine}`
+  );
 }
 
 /**
@@ -107,7 +132,6 @@ export function extractSections(content: string, sectionNames: string[]): string
     let inCodeBlock = false;
 
     for (const line of lines) {
-      // Track fenced code blocks
       if (line.trimStart().startsWith("```")) {
         inCodeBlock = !inCodeBlock;
         if (inSection) {
@@ -116,7 +140,6 @@ export function extractSections(content: string, sectionNames: string[]): string
         continue;
       }
 
-      // Skip heading detection inside code blocks
       if (inCodeBlock) {
         if (inSection) {
           sectionLines.push(line);
@@ -124,15 +147,13 @@ export function extractSections(content: string, sectionNames: string[]): string
         continue;
       }
 
-      // Check if this line is a heading
       const headingMatch = line.match(/^(#{2,3})\s+(.+?)\s*$/);
 
       if (headingMatch) {
-        const level = headingMatch[1].length; // 2 or 3
+        const level = headingMatch[1].length;
         const headingText = headingMatch[2];
 
         if (!inSection) {
-          // Check if this is our target section (case-insensitive)
           if (headingText.toLowerCase() === name.toLowerCase()) {
             inSection = true;
             sectionLevel = level;
@@ -140,11 +161,9 @@ export function extractSections(content: string, sectionNames: string[]): string
             continue;
           }
         } else {
-          // We're in section — stop if we hit a heading of same or higher level
           if (level <= sectionLevel) {
             break;
           }
-          // Lower-level heading (e.g., ### inside ##) — include it
           sectionLines.push(line);
           continue;
         }

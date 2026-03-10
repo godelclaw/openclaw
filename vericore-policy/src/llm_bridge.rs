@@ -197,14 +197,26 @@ mod tests {
 
     #[test]
     fn security_review_must_use_reviewer() {
-        assert!(call_kind_prompt_mode_consistent(CallKind::SecurityReview, PromptMode::Reviewer));
-        assert!(!call_kind_prompt_mode_consistent(CallKind::SecurityReview, PromptMode::Driver));
+        assert!(call_kind_prompt_mode_consistent(
+            CallKind::SecurityReview,
+            PromptMode::Reviewer
+        ));
+        assert!(!call_kind_prompt_mode_consistent(
+            CallKind::SecurityReview,
+            PromptMode::Driver
+        ));
     }
 
     #[test]
     fn driver_turn_must_use_driver() {
-        assert!(call_kind_prompt_mode_consistent(CallKind::DriverTurn, PromptMode::Driver));
-        assert!(!call_kind_prompt_mode_consistent(CallKind::DriverTurn, PromptMode::Reviewer));
+        assert!(call_kind_prompt_mode_consistent(
+            CallKind::DriverTurn,
+            PromptMode::Driver
+        ));
+        assert!(!call_kind_prompt_mode_consistent(
+            CallKind::DriverTurn,
+            PromptMode::Reviewer
+        ));
     }
 
     #[test]
@@ -215,8 +227,14 @@ mod tests {
 
     #[test]
     fn memory_refine_flexible_mode() {
-        assert!(call_kind_prompt_mode_consistent(CallKind::MemoryRefine, PromptMode::Driver));
-        assert!(call_kind_prompt_mode_consistent(CallKind::MemoryRefine, PromptMode::Reviewer));
+        assert!(call_kind_prompt_mode_consistent(
+            CallKind::MemoryRefine,
+            PromptMode::Driver
+        ));
+        assert!(call_kind_prompt_mode_consistent(
+            CallKind::MemoryRefine,
+            PromptMode::Reviewer
+        ));
     }
 
     #[test]

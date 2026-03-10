@@ -501,6 +501,16 @@ impl SecurityReviewer {
         self.move_existing_artifact(artifact_path, "pending-zar", "pending_zar", reason)
     }
 
+    pub fn ensure_artifact_target_meta(
+        &self,
+        artifact_path: &Path,
+        target_path: &Path,
+        source_stage: &str,
+        reason: &str,
+    ) -> Result<(), String> {
+        upsert_artifact_target_meta(artifact_path, target_path, source_stage, reason)
+    }
+
     pub fn reject_artifact(&self, artifact_path: &Path, reason: &str) -> Result<PathBuf, String> {
         self.move_existing_artifact(artifact_path, "rejected", "rejected", reason)
     }
@@ -757,7 +767,7 @@ impl SecurityReviewer {
             ChatMessage::user(&user_prompt),
         ];
 
-        let (result, _usage) = self
+        let (result, _usage, _meta) = self
             .llm
             .chat(&messages, &[])
             .await
@@ -1056,6 +1066,111 @@ fn read_optional_file(path: Option<&Path>) -> Result<String, String> {
             "failed to read security reviewer context {}: {err}",
             path.display()
         )),
+    }
+}
+
+fn upsert_artifact_target_meta(
+    artifact_path: &Path,
+    target_path: &Path,
+    source_stage: &str,
+    reason: &str,
+) -> Result<(), String> {
+    let meta_path = artifact_path.with_extension("meta.json");
+    let mut meta = if meta_path.exists() {
+        let raw = fs::read(&meta_path).map_err(|e| {
+            format!(
+                "failed to read artifact meta ({}): {e}",
+                meta_path.display()
+            )
+        })?;
+        serde_json::from_slice::<Value>(&raw).unwrap_or_else(|_| json!({}))
+    } else {
+        json!({})
+    };
+
+    if !meta.is_object() {
+        meta = json!({});
+    }
+
+    let id = artifact_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("artifact")
+        .to_string();
+
+    meta["id"] = Value::String(id);
+    meta["status"] = Value::String(source_stage.to_string());
+    meta["target_path"] = Value::String(target_path.display().to_string());
+    if meta
+        .get("reason")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .is_empty()
+    {
+        meta["reason"] = Value::String(reason.to_string());
+    }
+    if meta.get("created_at").and_then(Value::as_u64).is_none() {
+        meta["created_at"] = json!(now_secs());
+    }
+
+    fs::write(
+        &meta_path,
+        serde_json::to_vec_pretty(&meta).unwrap_or_default(),
+    )
+    .map_err(|e| {
+        format!(
+            "failed to write artifact meta ({}): {e}",
+            meta_path.display()
+        )
+    })?;
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::upsert_artifact_target_meta;
+    use serde_json::Value;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_temp_dir() -> PathBuf {
+        let mut base = std::env::temp_dir();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        base.push(format!("vericore-security-review-test-{nanos}"));
+        base
+    }
+
+    #[test]
+    fn upsert_artifact_target_meta_creates_sidecar_for_existing_artifact() {
+        let dir = unique_temp_dir();
+        fs::create_dir_all(&dir).expect("temp dir");
+        let artifact_path = dir.join("draft.md");
+        fs::write(&artifact_path, "hello world").expect("artifact");
+        let target_path = PathBuf::from("/home/zarclaw/mindlock/out/draft.md");
+
+        upsert_artifact_target_meta(&artifact_path, &target_path, "work", "needs review")
+            .expect("meta write");
+
+        let meta_path = artifact_path.with_extension("meta.json");
+        let meta_bytes = fs::read(&meta_path).expect("meta read");
+        let meta: Value = serde_json::from_slice(&meta_bytes).expect("meta parse");
+        assert_eq!(meta.get("status").and_then(Value::as_str), Some("work"));
+        assert_eq!(
+            meta.get("target_path").and_then(Value::as_str),
+            Some("/home/zarclaw/mindlock/out/draft.md")
+        );
+        assert_eq!(
+            meta.get("reason").and_then(Value::as_str),
+            Some("needs review")
+        );
+
+        fs::remove_dir_all(&dir).ok();
     }
 }
 

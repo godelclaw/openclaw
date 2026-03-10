@@ -43,10 +43,34 @@ function makeParams(
             path: "/tmp/workspace/AGENTS.md",
             missing: false,
             rawChars: truncated ? 200_000 : 10_000,
+            injected: true,
             injectedChars: truncated ? 20_000 : 10_000,
             truncated,
           },
+          {
+            name: "SOUL.md",
+            path: "/tmp/workspace/SOUL.md",
+            missing: false,
+            rawChars: 5_000,
+            injected: true,
+            injectedChars: 5_000,
+            truncated: false,
+          },
         ],
+        startupIdentityObserved: {
+          agents_available: true,
+          agents_injected: true,
+          soul_available: true,
+          soul_injected: true,
+        },
+        startupIdentityContract: {
+          checked: true,
+          contract_ok: true,
+          agents_available: true,
+          agents_injected: true,
+          soul_available: true,
+          soul_injected: true,
+        },
         skills: {
           promptChars: 10,
           entries: [{ name: "checks", blockChars: 10 }],
@@ -77,6 +101,14 @@ describe("buildContextReply", () => {
   it("does not show bootstrap truncation warning when there is no truncation", async () => {
     const result = await buildContextReply(makeParams("/context list", false));
     expect(result.text).not.toContain("Bootstrap context is over configured limits");
+  });
+
+  it("shows startup identity lines when present in the report", async () => {
+    const result = await buildContextReply(makeParams("/context list", false));
+    expect(result.text).toContain(
+      "Startup identity (observed): AGENTS available=true injected=true; SOUL available=true injected=true",
+    );
+    expect(result.text).toContain("Startup identity (VeriCore): verified");
   });
 
   it("falls back to config defaults when legacy reports are missing bootstrap limits", async () => {

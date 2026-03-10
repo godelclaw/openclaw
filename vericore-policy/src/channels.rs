@@ -4,8 +4,8 @@
 //! Config overrides (channel_map) remain in vericore-core since they involve
 //! runtime configuration. This module provides the pure default mapping.
 
-use vstd::prelude::*;
 use crate::tiers::{ContextTier, IntegrityTier};
+use vstd::prelude::*;
 
 verus! {
 
@@ -112,8 +112,14 @@ mod tests {
 
     #[test]
     fn family_channel_is_reviewed() {
-        assert_eq!(default_context_for_channel(Channel::TelegramFamily), ContextTier::Family);
-        assert_eq!(default_integrity_for_channel(Channel::TelegramFamily), IntegrityTier::Reviewed);
+        assert_eq!(
+            default_context_for_channel(Channel::TelegramFamily),
+            ContextTier::Family
+        );
+        assert_eq!(
+            default_integrity_for_channel(Channel::TelegramFamily),
+            IntegrityTier::Reviewed
+        );
     }
 
     #[test]

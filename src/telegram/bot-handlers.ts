@@ -44,6 +44,7 @@ import {
   runVeriCoreMindlockPending,
   runVeriCoreMindlockReject,
   runVeriCoreMindlockStatus,
+  runVeriCoreMindlockView,
   runVeriCoreStimulusRoute,
   runVeriCoreStimulusRun,
   type VeriCoreMemoryQueryResult,
@@ -54,6 +55,7 @@ import {
   type VeriCoreMindlockListResult,
   type VeriCoreMindlockPendingResult,
   type VeriCoreMindlockStatusResult,
+  type VeriCoreMindlockViewResult,
   type VeriCoreRoutePreference,
 } from "../vericore/impetus.js";
 import { withTelegramApiErrorLogging } from "./api-logging.js";
@@ -168,6 +170,18 @@ function parseMemoryRefineEmbedFlag(text?: string): boolean {
   return /(^|\s)(--embed|embed)(\s|$)/i.test(body);
 }
 
+function extractSlashCommand(text?: string): string | undefined {
+  const trimmed = (text ?? "").trimStart();
+  if (!trimmed.startsWith("/")) {
+    return undefined;
+  }
+
+  const token = trimmed.split(/\s+/, 1)[0] ?? "";
+  const bare = token.replace(/^\//, "");
+  const command = bare.split("@")[0]?.trim().toLowerCase();
+  return command || undefined;
+}
+
 function isMemoryPromoteCommand(command?: string | null): boolean {
   if (!command) {
     return false;
@@ -194,6 +208,14 @@ function isMindlockReviewCommand(command?: string | null): boolean {
   }
   const normalized = command.trim().toLowerCase();
   return normalized === "review";
+}
+
+function isMindlockViewCommand(command?: string | null): boolean {
+  if (!command) {
+    return false;
+  }
+  const normalized = command.trim().toLowerCase();
+  return normalized === "view";
 }
 
 function isMindlockApproveCommand(command?: string | null): boolean {
@@ -410,9 +432,9 @@ function formatMindlockPendingMessage(result: VeriCoreMindlockPendingResult): st
     asOf,
     ...lines,
     more,
+    "View: /view <id|index>",
     "Approve: /a <id|index> [reason]",
     "Reject: /reject <id|index> [reason] (alias: /r)",
-    "Note: /approve is the legacy exec-approval command.",
   ]
     .filter((line): line is string => typeof line === "string" && line.trim().length > 0)
     .join("\n");
@@ -433,6 +455,7 @@ function formatMindlockStatusMessage(result: VeriCoreMindlockStatusResult): stri
     `- rejected: ${result.counts.rejected}`,
     "",
     "Views: /mindlock in|out|pending|rejected [limit]",
+    "View: /view <id|index>",
     "Approve: /a <id|index> [reason]",
     "Reject: /reject <id|index> [reason] (alias: /r)",
   ]
@@ -466,6 +489,39 @@ function formatMindlockListMessage(result: VeriCoreMindlockListResult): string {
 
   return [`Mindlock ${result.box} (${result.count}):`, asOf, ...lines]
     .filter((line) => line !== undefined && line.trim().length > 0)
+    .join("\n");
+}
+
+function formatMindlockViewMessage(result: VeriCoreMindlockViewResult): string {
+  const asOf =
+    typeof result.modified_ts === "number"
+      ? `Modified: ${new Date(result.modified_ts * 1000).toISOString()}`
+      : undefined;
+  const target = result.target_path ? `- target: ${result.target_path}` : undefined;
+  const reviewer = result.reviewer_assessment?.verdict
+    ? `- reviewer: ${result.reviewer_assessment.verdict}${
+        result.reviewer_assessment.reason ? ` — ${result.reviewer_assessment.reason}` : ""
+      }`
+    : result.reviewer_assessment?.status === "pending"
+      ? "- reviewer: pending"
+      : undefined;
+  const previewHeader = result.preview_binary
+    ? "Preview: binary artifact"
+    : result.preview_truncated
+      ? "Preview (truncated):"
+      : "Preview:";
+
+  return [
+    `Mindlock view: ${result.id}`,
+    asOf,
+    `- path: ${result.path}`,
+    target,
+    `- bytes: ${result.size_bytes}`,
+    reviewer,
+    previewHeader,
+    result.preview,
+  ]
+    .filter((line): line is string => typeof line === "string" && line.trim().length > 0)
     .join("\n");
 }
 
@@ -817,6 +873,127 @@ export const registerTelegramHandlers = ({
     });
   };
 
+  const handleMindlockTelegramCommand = async (
+    msg: Message,
+    stimulusInput: ReturnType<typeof buildVeriCoreStimulusForMessage>,
+    command?: string | null,
+  ): Promise<boolean> => {
+    if (
+      !isMindlockCommand(command) &&
+      !isMindlockReviewCommand(command) &&
+      !isMindlockViewCommand(command) &&
+      !isMindlockApproveCommand(command) &&
+      !isMindlockRejectCommand(command)
+    ) {
+      return false;
+    }
+
+    if (!isMindlockOwnerSender(msg)) {
+      await sendVeriCoreDriverResponse(msg, "Mindlock review commands are owner-only.");
+      return true;
+    }
+
+    logVerbose(
+      `[telegram] fast-path mindlock command /${command ?? "unknown"} chat=${msg.chat.id} message=${msg.message_id}`,
+    );
+
+    if (isMindlockCommand(command)) {
+      const parsed = parseMindlockMenuArgs(msg.text ?? msg.caption ?? "");
+      if (parsed.error) {
+        await sendVeriCoreDriverResponse(msg, parsed.error);
+        return true;
+      }
+
+      try {
+        if (!parsed.box) {
+          const status = await runVeriCoreMindlockStatus(stimulusInput);
+          await sendVeriCoreDriverResponse(msg, formatMindlockStatusMessage(status));
+          return true;
+        }
+
+        const listing = await runVeriCoreMindlockList(parsed.box, stimulusInput, parsed.limit);
+        await sendVeriCoreDriverResponse(msg, formatMindlockListMessage(listing));
+        return true;
+      } catch (err) {
+        const message = "mindlock command failed: " + String(err);
+        runtime.error?.(warn(message));
+        await sendVeriCoreDriverResponse(msg, message);
+        return true;
+      }
+    }
+
+    if (isMindlockReviewCommand(command)) {
+      try {
+        const result = await runVeriCoreMindlockPending(stimulusInput);
+        await sendVeriCoreDriverResponse(msg, formatMindlockPendingMessage(result));
+        return true;
+      } catch (err) {
+        const message = "mindlock review failed: " + String(err);
+        runtime.error?.(warn(message));
+        await sendVeriCoreDriverResponse(msg, message);
+        return true;
+      }
+    }
+
+    if (isMindlockViewCommand(command)) {
+      const parsed = parseMindlockArtifactArgs(msg.text ?? msg.caption ?? "");
+      if (!parsed.artifactId) {
+        await sendVeriCoreDriverResponse(msg, "Usage: /view <artifact_id|index>");
+        return true;
+      }
+
+      try {
+        const result = await runVeriCoreMindlockView(parsed.artifactId, stimulusInput);
+        await sendVeriCoreDriverResponse(msg, formatMindlockViewMessage(result));
+        return true;
+      } catch (err) {
+        const message = "mindlock view failed: " + String(err);
+        runtime.error?.(warn(message));
+        await sendVeriCoreDriverResponse(msg, message);
+        return true;
+      }
+    }
+
+    if (isMindlockApproveCommand(command)) {
+      const parsed = parseMindlockArtifactArgs(msg.text ?? msg.caption ?? "");
+      if (!parsed.artifactId) {
+        await sendVeriCoreDriverResponse(msg, "Usage: /a <artifact_id|index> [reason]");
+        return true;
+      }
+
+      try {
+        const result = await runVeriCoreMindlockApprove(parsed.artifactId, stimulusInput, parsed.reason);
+        await sendVeriCoreDriverResponse(msg, formatMindlockDecisionMessage(result));
+        return true;
+      } catch (err) {
+        const message = "mindlock approve failed: " + String(err);
+        runtime.error?.(warn(message));
+        await sendVeriCoreDriverResponse(msg, message);
+        return true;
+      }
+    }
+
+    const parsed = parseMindlockArtifactArgs(msg.text ?? msg.caption ?? "");
+    if (!parsed.artifactId) {
+      await sendVeriCoreDriverResponse(
+        msg,
+        "Usage: /reject <artifact_id|index> [reason] (alias: /r)",
+      );
+      return true;
+    }
+
+    try {
+      const result = await runVeriCoreMindlockReject(parsed.artifactId, stimulusInput, parsed.reason);
+      await sendVeriCoreDriverResponse(msg, formatMindlockDecisionMessage(result));
+      return true;
+    } catch (err) {
+      const message = "mindlock reject failed: " + String(err);
+      runtime.error?.(warn(message));
+      await sendVeriCoreDriverResponse(msg, message);
+      return true;
+    }
+  };
+
   const handleIngressWithVeriCore = async (params: {
     msg: Message;
     onFallback: () => Promise<void>;
@@ -827,11 +1004,16 @@ export const registerTelegramHandlers = ({
     }
 
     const stimulusInput = buildVeriCoreStimulusForMessage(params.msg);
+    const rawCommand = extractSlashCommand(params.msg.text ?? params.msg.caption ?? "");
 
     // If Telegram message content is effectively empty, fall back to OpenClaw's richer
     // inbound context pipeline instead of sending metadata-only stimuli to VeriCore.
     if (!stimulusInput.content.trim()) {
       await params.onFallback();
+      return;
+    }
+
+    if (await handleMindlockTelegramCommand(params.msg, stimulusInput, rawCommand)) {
       return;
     }
 
@@ -986,103 +1168,8 @@ export const registerTelegramHandlers = ({
         }
       }
 
-      if (
-        isMindlockCommand(route.command) ||
-        isMindlockReviewCommand(route.command) ||
-        isMindlockApproveCommand(route.command) ||
-        isMindlockRejectCommand(route.command)
-      ) {
-        if (!isMindlockOwnerSender(params.msg)) {
-          await sendVeriCoreDriverResponse(params.msg, "Mindlock review commands are owner-only.");
-          return;
-        }
-
-        if (isMindlockCommand(route.command)) {
-          const parsed = parseMindlockMenuArgs(params.msg.text ?? params.msg.caption ?? "");
-          if (parsed.error) {
-            await sendVeriCoreDriverResponse(params.msg, parsed.error);
-            return;
-          }
-
-          try {
-            if (!parsed.box) {
-              const status = await runVeriCoreMindlockStatus(stimulusInput);
-              await sendVeriCoreDriverResponse(params.msg, formatMindlockStatusMessage(status));
-              return;
-            }
-
-            const listing = await runVeriCoreMindlockList(parsed.box, stimulusInput, parsed.limit);
-            await sendVeriCoreDriverResponse(params.msg, formatMindlockListMessage(listing));
-            return;
-          } catch (err) {
-            const message = "mindlock command failed: " + String(err);
-            runtime.error?.(warn(message));
-            await sendVeriCoreDriverResponse(params.msg, message);
-            return;
-          }
-        }
-
-        if (isMindlockReviewCommand(route.command)) {
-          try {
-            const result = await runVeriCoreMindlockPending(stimulusInput);
-            await sendVeriCoreDriverResponse(params.msg, formatMindlockPendingMessage(result));
-            return;
-          } catch (err) {
-            const message = "mindlock review failed: " + String(err);
-            runtime.error?.(warn(message));
-            await sendVeriCoreDriverResponse(params.msg, message);
-            return;
-          }
-        }
-
-        if (isMindlockApproveCommand(route.command)) {
-          const parsed = parseMindlockArtifactArgs(params.msg.text ?? params.msg.caption ?? "");
-          if (!parsed.artifactId) {
-            await sendVeriCoreDriverResponse(params.msg, "Usage: /a <artifact_id|index> [reason]");
-            return;
-          }
-
-          try {
-            const result = await runVeriCoreMindlockApprove(
-              parsed.artifactId,
-              stimulusInput,
-              parsed.reason,
-            );
-            await sendVeriCoreDriverResponse(params.msg, formatMindlockDecisionMessage(result));
-            return;
-          } catch (err) {
-            const message = "mindlock approve failed: " + String(err);
-            runtime.error?.(warn(message));
-            await sendVeriCoreDriverResponse(params.msg, message);
-            return;
-          }
-        }
-
-        if (isMindlockRejectCommand(route.command)) {
-          const parsed = parseMindlockArtifactArgs(params.msg.text ?? params.msg.caption ?? "");
-          if (!parsed.artifactId) {
-            await sendVeriCoreDriverResponse(
-              params.msg,
-              "Usage: /reject <artifact_id|index> [reason] (alias: /r)",
-            );
-            return;
-          }
-
-          try {
-            const result = await runVeriCoreMindlockReject(
-              parsed.artifactId,
-              stimulusInput,
-              parsed.reason,
-            );
-            await sendVeriCoreDriverResponse(params.msg, formatMindlockDecisionMessage(result));
-            return;
-          } catch (err) {
-            const message = "mindlock reject failed: " + String(err);
-            runtime.error?.(warn(message));
-            await sendVeriCoreDriverResponse(params.msg, message);
-            return;
-          }
-        }
+      if (await handleMindlockTelegramCommand(params.msg, stimulusInput, route.command)) {
+        return;
       }
 
       await params.onFallback();

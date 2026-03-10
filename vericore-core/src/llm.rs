@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
-use crate::config::LlmConfig;
+use crate::config::{LlmConfig, ModelPolicyConfig};
 
 /// What kind of LLM call is being made (for TS-side logging/routing).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -34,6 +34,7 @@ pub struct GatewayLlmClient {
     session_key: Option<String>,
     max_tokens: u32,
     temperature: f64,
+    model_policy: ModelPolicyConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,6 +86,24 @@ pub enum LlmTurnResult {
 pub struct LlmUsage {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
+}
+
+/// Model resolution metadata from the TS completions bridge.
+/// Captures what was configured vs what was actually used, for audit.
+#[derive(Debug, Clone, Serialize, Default, PartialEq, Eq)]
+pub struct ModelResolutionMeta {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub configured_model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub override_model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub override_source: Option<String>,
+    pub fallback_used: bool,
+    pub provider_changed: bool,
 }
 
 #[derive(Debug)]
@@ -194,12 +213,16 @@ struct BridgeResponse {
     resolved_model: Option<String>,
     #[serde(default)]
     resolved_provider: Option<String>,
-    #[serde(default)]
-    resolved_profile: Option<String>,
+    #[serde(default, rename = "resolved_profile")]
+    _resolved_profile: Option<String>,
     #[serde(default)]
     fallback_used: Option<bool>,
     #[serde(default)]
     provider_changed: Option<bool>,
+    #[serde(default)]
+    override_model: Option<String>,
+    #[serde(default)]
+    override_source: Option<String>,
     #[serde(default)]
     choices: Option<Vec<BridgeChoice>>,
     #[serde(default)]
@@ -261,6 +284,7 @@ impl GatewayLlmClient {
             session_key,
             max_tokens: config.max_tokens,
             temperature: config.temperature,
+            model_policy: config.model_policy.clone(),
         })
     }
 
@@ -268,7 +292,7 @@ impl GatewayLlmClient {
         &self,
         messages: &[ChatMessage],
         tools: &[serde_json::Value],
-    ) -> Result<(LlmTurnResult, LlmUsage), LlmError> {
+    ) -> Result<(LlmTurnResult, LlmUsage, ModelResolutionMeta), LlmError> {
         let request = BridgeRequest {
             request_id: generate_request_id(),
             session_key: self.session_key.as_deref(),
@@ -294,26 +318,37 @@ impl GatewayLlmClient {
             });
         }
 
-        // Log resolution metadata (only on actual fallback)
-        if resp.fallback_used.unwrap_or(false) {
-            if let (Some(configured), Some(resolved)) =
-                (&resp.configured_model, &resp.resolved_model)
-            {
-                eprintln!(
-                    "[vericore] bridge: model fallback {} -> {} (provider: {}, profile: {}, provider_changed: {})",
-                    configured,
-                    resolved,
-                    resp.resolved_provider.as_deref().unwrap_or("unknown"),
-                    resp.resolved_profile.as_deref().unwrap_or("default"),
-                    resp.provider_changed.unwrap_or(false),
-                );
-            }
-        }
-
         let usage = resp.usage.map_or(LlmUsage::default(), |u| LlmUsage {
             prompt_tokens: u.prompt_tokens,
             completion_tokens: u.completion_tokens,
         });
+
+        let meta = ModelResolutionMeta {
+            configured_model: resp.configured_model,
+            resolved_model: resp.resolved_model,
+            resolved_provider: resp.resolved_provider,
+            override_model: resp.override_model,
+            override_source: resp.override_source,
+            fallback_used: resp.fallback_used.unwrap_or(false),
+            provider_changed: resp.provider_changed.unwrap_or(false),
+        };
+
+        self.validate_model_resolution(&meta)?;
+
+        // Log resolution metadata (only on actual fallback)
+        if meta.fallback_used {
+            if let (Some(configured), Some(resolved)) =
+                (&meta.configured_model, &meta.resolved_model)
+            {
+                eprintln!(
+                    "[vericore] bridge: model fallback {} -> {} (provider: {}, provider_changed: {})",
+                    configured,
+                    resolved,
+                    meta.resolved_provider.as_deref().unwrap_or("unknown"),
+                    meta.provider_changed,
+                );
+            }
+        }
 
         let choices = resp.choices.unwrap_or_default();
         let choice = choices
@@ -328,8 +363,8 @@ impl GatewayLlmClient {
                 let mut parsed = Vec::new();
                 for call in calls {
                     let args_str = &call.function.arguments;
-                    let arguments: serde_json::Value = serde_json::from_str(args_str)
-                        .unwrap_or(serde_json::json!({}));
+                    let arguments: serde_json::Value =
+                        serde_json::from_str(args_str).unwrap_or(serde_json::json!({}));
                     parsed.push(ToolCall {
                         id: call.id.clone(),
                         name: call.function.name.clone(),
@@ -342,12 +377,113 @@ impl GatewayLlmClient {
                         tool_calls: parsed,
                     },
                     usage,
+                    meta,
                 ));
             }
         }
 
         let text = content.unwrap_or_default();
-        Ok((LlmTurnResult::FinalResponse { content: text }, usage))
+        Ok((LlmTurnResult::FinalResponse { content: text }, usage, meta))
+    }
+
+    fn validate_model_resolution(&self, meta: &ModelResolutionMeta) -> Result<(), LlmError> {
+        let configured_model = normalized_opt(meta.configured_model.as_deref());
+        let resolved_model = normalized_opt(meta.resolved_model.as_deref());
+        let resolved_provider = normalized_opt(meta.resolved_provider.as_deref());
+        let override_model = normalized_opt(meta.override_model.as_deref());
+
+        let meta_complete = vericore_policy::session_model_policy::resolution_meta_complete(
+            configured_model.is_some(),
+            resolved_model.is_some(),
+            resolved_provider.is_some(),
+        );
+
+        let resolved_ref = match (resolved_provider, resolved_model) {
+            (Some(provider), Some(model)) => Some(format!("{provider}/{model}")),
+            _ => None,
+        };
+        let model_changed = match (configured_model, resolved_ref.as_deref()) {
+            (Some(configured), Some(resolved)) => configured != resolved,
+            _ => false,
+        };
+        let fallback_visible = vericore_policy::session_model_policy::fallback_visible(
+            model_changed,
+            meta.fallback_used,
+            configured_model.is_some(),
+        );
+
+        let provider_consistent = match (
+            configured_model.and_then(provider_from_model_ref),
+            resolved_provider,
+        ) {
+            (Some(configured_provider), Some(actual_provider)) => {
+                vericore_policy::session_model_policy::provider_change_consistent(
+                    configured_provider != actual_provider,
+                    meta.provider_changed,
+                )
+            }
+            _ => false,
+        };
+
+        let resolved_in_allowlist = resolved_ref
+            .as_deref()
+            .map(|resolved| {
+                self.model_policy
+                    .allowlist
+                    .iter()
+                    .any(|entry| entry.trim() == resolved)
+            })
+            .unwrap_or(false);
+        let allowlist_ok = vericore_policy::session_model_policy::allowlist_enforced(
+            resolved_in_allowlist,
+            self.model_policy.allowlist.is_empty(),
+        );
+
+        let has_override = override_model.is_some();
+        let configured_matches_override = match (configured_model, override_model) {
+            (Some(configured), Some(expected_override)) => configured == expected_override,
+            _ => false,
+        };
+        let override_ok = vericore_policy::session_model_policy::override_applied(
+            has_override,
+            configured_matches_override,
+        );
+
+        let contract_ok = vericore_policy::session_model_policy::bridge_model_contract_ok(
+            meta_complete,
+            fallback_visible,
+            provider_consistent,
+            allowlist_ok,
+            override_ok,
+        );
+        if contract_ok {
+            return Ok(());
+        }
+
+        let mut failures = Vec::new();
+        if !meta_complete {
+            failures.push("incomplete metadata".to_string());
+        }
+        if !fallback_visible {
+            failures.push("fallback visibility mismatch".to_string());
+        }
+        if !provider_consistent {
+            failures.push("provider_changed flag mismatch".to_string());
+        }
+        if !allowlist_ok {
+            failures.push("resolved model not in allowlist".to_string());
+        }
+        if !override_ok {
+            failures.push("configured model does not match override metadata".to_string());
+        }
+
+        let message = format!("model resolution contract failed: {}", failures.join("; "));
+        if self.model_policy.enforce {
+            Err(LlmError::Bridge { message })
+        } else {
+            eprintln!("[vericore] bridge: {message}");
+            Ok(())
+        }
     }
 
     async fn send_to_gateway(&self, request_json: &[u8]) -> Result<Vec<u8>, LlmError> {
@@ -421,4 +557,103 @@ fn generate_request_id() -> String {
         .unwrap_or_default()
         .as_nanos();
     format!("vc-{nanos:x}")
+}
+
+fn normalized_opt(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|s| !s.is_empty())
+}
+
+fn provider_from_model_ref(model_ref: &str) -> Option<&str> {
+    model_ref.split_once('/').map(|(provider, _)| provider)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ModelResolutionMeta, normalized_opt, provider_from_model_ref};
+    use crate::config::ModelPolicyConfig;
+
+    fn validate(meta: &ModelResolutionMeta, policy: ModelPolicyConfig) -> Result<(), String> {
+        let client = super::GatewayLlmClient {
+            socket_path: std::path::PathBuf::from("/tmp/test.sock"),
+            timeout: std::time::Duration::from_secs(1),
+            call_kind: super::CallKind::DriverTurn,
+            prompt_mode: super::PromptMode::Driver,
+            session_key: None,
+            max_tokens: 1,
+            temperature: 0.0,
+            model_policy: policy,
+        };
+        client
+            .validate_model_resolution(meta)
+            .map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn normalization_helpers_work() {
+        assert_eq!(normalized_opt(Some("  x  ")), Some("x"));
+        assert_eq!(normalized_opt(Some("   ")), None);
+        assert_eq!(
+            provider_from_model_ref("openrouter/grok-4.1-fast"),
+            Some("openrouter")
+        );
+        assert_eq!(provider_from_model_ref("grok-4.1-fast"), None);
+    }
+
+    #[test]
+    fn validation_accepts_complete_visible_metadata() {
+        let meta = ModelResolutionMeta {
+            configured_model: Some("openrouter/grok-4.1-fast".into()),
+            resolved_model: Some("grok-4.1-fast".into()),
+            resolved_provider: Some("openrouter".into()),
+            override_model: Some("openrouter/grok-4.1-fast".into()),
+            override_source: Some("session".into()),
+            fallback_used: false,
+            provider_changed: false,
+        };
+        assert!(validate(&meta, ModelPolicyConfig::default()).is_ok());
+    }
+
+    #[test]
+    fn validation_rejects_override_mismatch_when_enforced() {
+        let meta = ModelResolutionMeta {
+            configured_model: Some("openrouter/grok-4.1-fast".into()),
+            resolved_model: Some("grok-4.1-fast".into()),
+            resolved_provider: Some("openrouter".into()),
+            override_model: Some("anthropic/claude-sonnet-4".into()),
+            override_source: Some("session".into()),
+            fallback_used: false,
+            provider_changed: false,
+        };
+        let err = validate(
+            &meta,
+            ModelPolicyConfig {
+                enforce: true,
+                allowlist: vec![],
+            },
+        )
+        .expect_err("override mismatch should fail when enforced");
+        assert!(err.contains("override metadata"));
+    }
+
+    #[test]
+    fn validation_rejects_unlisted_model_when_enforced() {
+        let meta = ModelResolutionMeta {
+            configured_model: Some("openrouter/grok-4.1-fast".into()),
+            resolved_model: Some("grok-4.1-fast".into()),
+            resolved_provider: Some("openrouter".into()),
+            override_model: None,
+            override_source: None,
+            fallback_used: false,
+            provider_changed: false,
+        };
+        let err = validate(
+            &meta,
+            ModelPolicyConfig {
+                enforce: true,
+                allowlist: vec!["anthropic/claude-sonnet-4".into()],
+            },
+        )
+        .expect_err("allowlist mismatch should fail when enforced");
+        assert!(err.contains("allowlist"));
+    }
 }

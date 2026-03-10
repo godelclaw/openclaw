@@ -32,6 +32,32 @@ describe("buildSystemPromptReport", () => {
       tools: [],
     });
 
+  it("records startup identity observation for AGENTS and SOUL", () => {
+    const report = buildSystemPromptReport({
+      source: "run",
+      generatedAt: 0,
+      bootstrapMaxChars: 20_000,
+      systemPrompt: "system",
+      bootstrapFiles: [
+        makeBootstrapFile({ name: "AGENTS.md", path: "/tmp/workspace/AGENTS.md" }),
+        makeBootstrapFile({ name: "SOUL.md", path: "/tmp/workspace/SOUL.md" }),
+      ],
+      injectedFiles: [
+        { path: "/tmp/workspace/AGENTS.md", content: "agents" },
+        { path: "/tmp/workspace/SOUL.md", content: "soul" },
+      ],
+      skillsPrompt: "",
+      tools: [],
+    });
+
+    expect(report.startupIdentityObserved).toEqual({
+      agents_available: true,
+      agents_injected: true,
+      soul_available: true,
+      soul_injected: true,
+    });
+  });
+
   it("counts injected chars when injected file paths are absolute", () => {
     const file = makeBootstrapFile({ path: "/tmp/workspace/policies/AGENTS.md" });
     const report = makeReport({

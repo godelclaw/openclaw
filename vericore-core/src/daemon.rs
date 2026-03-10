@@ -38,6 +38,7 @@ const BOOTSTRAP_MAX_LINE_CHARS: usize = 320;
 const BOOTSTRAP_MAX_ITEMS_PER_FILE: usize = 200;
 const HISTORY_MAX_USER_CHARS: usize = 800;
 const HISTORY_MAX_ASSISTANT_CHARS: usize = 1200;
+const MINDLOCK_VIEW_PREVIEW_MAX_CHARS: usize = 2000;
 const MEMORY_EMBED_ON_INGEST_DEFAULT: bool = false;
 const MEMORY_EMBED_ON_STARTUP_BACKFILL_DEFAULT: bool = false;
 const MEMORY_SLEEP_INTERVAL_SECS_DEFAULT: u64 = 0;
@@ -71,6 +72,14 @@ pub struct DaemonRequest {
     pub stage: Option<String>,
     #[serde(default)]
     pub limit: Option<usize>,
+    #[serde(default)]
+    pub agents_available: Option<bool>,
+    #[serde(default)]
+    pub agents_injected: Option<bool>,
+    #[serde(default)]
+    pub soul_available: Option<bool>,
+    #[serde(default)]
+    pub soul_injected: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -237,6 +246,42 @@ async fn handle_client(mut stream: UnixStream, shared: Arc<SharedState>) -> Resu
 async fn dispatch_request(request: DaemonRequest, shared: &SharedState) -> DaemonResponse {
     match request.method.as_str() {
         "health" => DaemonResponse::ok(request.id, json!({"status":"ok"})),
+        "startup_identity_validate" => {
+            let Some(agents_available) = request.agents_available else {
+                return DaemonResponse::err(
+                    request.id,
+                    "missing agents_available for method=startup_identity_validate",
+                );
+            };
+            let Some(agents_injected) = request.agents_injected else {
+                return DaemonResponse::err(
+                    request.id,
+                    "missing agents_injected for method=startup_identity_validate",
+                );
+            };
+            let Some(soul_available) = request.soul_available else {
+                return DaemonResponse::err(
+                    request.id,
+                    "missing soul_available for method=startup_identity_validate",
+                );
+            };
+            let Some(soul_injected) = request.soul_injected else {
+                return DaemonResponse::err(
+                    request.id,
+                    "missing soul_injected for method=startup_identity_validate",
+                );
+            };
+
+            DaemonResponse::ok(
+                request.id,
+                build_startup_identity_contract_result(
+                    agents_available,
+                    agents_injected,
+                    soul_available,
+                    soul_injected,
+                ),
+            )
+        }
         "memory_status" => {
             let (stats, missing_embeddings, missing_source_dates) = {
                 let memory = shared.memory.lock().await;
@@ -585,6 +630,46 @@ async fn dispatch_request(request: DaemonRequest, shared: &SharedState) -> Daemo
                 }),
             )
         }
+        "mindlock_view" => {
+            let Some(stimulus_input) = request.stimulus.as_ref() else {
+                return DaemonResponse::err(
+                    request.id,
+                    "missing stimulus for method=mindlock_view",
+                );
+            };
+            let stimulus = match stimulus_input.to_stimulus() {
+                Ok(stimulus) => stimulus,
+                Err(err) => return DaemonResponse::err(request.id, err),
+            };
+            let context = shared.policy.context_for_channel(stimulus.channel);
+            if context != ContextTier::Private {
+                return DaemonResponse::err(
+                    request.id,
+                    "mindlock_view is only allowed from private context",
+                );
+            }
+
+            let Some(artifact_id) = request.artifact_id.as_deref() else {
+                return DaemonResponse::err(
+                    request.id,
+                    "missing artifact_id for method=mindlock_view",
+                );
+            };
+
+            let pending_dir = shared
+                .config
+                .security_review
+                .mindlock_dir
+                .join("pending-zar");
+            let result = match build_mindlock_pending_view(&pending_dir, artifact_id) {
+                Ok(result) => result,
+                Err(err) => {
+                    return DaemonResponse::err(request.id, format!("mindlock_view failed: {err}"));
+                }
+            };
+
+            DaemonResponse::ok(request.id, result)
+        }
         "mindlock_approve" => {
             let Some(stimulus_input) = request.stimulus.as_ref() else {
                 return DaemonResponse::err(
@@ -777,10 +862,7 @@ async fn dispatch_request(request: DaemonRequest, shared: &SharedState) -> Daemo
                 let cap = shared.config.security_review.max_precedent_items;
                 let count = memory.count_by_type(&MemoryType::SecurityPrecedent);
                 if count >= cap {
-                    memory.prune_oldest_by_type(
-                        &MemoryType::SecurityPrecedent,
-                        count - cap + 1,
-                    );
+                    memory.prune_oldest_by_type(&MemoryType::SecurityPrecedent, count - cap + 1);
                 }
                 memory.remember(CreateMemoryInput {
                     tier: MemoryTier::Private,
@@ -925,10 +1007,7 @@ async fn dispatch_request(request: DaemonRequest, shared: &SharedState) -> Daemo
                 let cap = shared.config.security_review.max_precedent_items;
                 let count = memory.count_by_type(&MemoryType::SecurityPrecedent);
                 if count >= cap {
-                    memory.prune_oldest_by_type(
-                        &MemoryType::SecurityPrecedent,
-                        count - cap + 1,
-                    );
+                    memory.prune_oldest_by_type(&MemoryType::SecurityPrecedent, count - cap + 1);
                 }
                 memory.remember(CreateMemoryInput {
                     tier: MemoryTier::Private,
@@ -1363,7 +1442,7 @@ async fn run_nightly_history_extract(
 
         let messages = vec![system_msg.clone(), ChatMessage::user(&prompt)];
 
-        let (result, _usage) = match llm.chat(&messages, &[]).await {
+        let (result, _usage, _meta) = match llm.chat(&messages, &[]).await {
             Ok(r) => r,
             Err(e) => {
                 eprintln!(
@@ -1540,6 +1619,36 @@ async fn run_memory_refine_once(
         },
         "save_error": save_error,
     }))
+}
+
+fn build_startup_identity_contract_result(
+    agents_available: bool,
+    agents_injected: bool,
+    soul_available: bool,
+    soul_injected: bool,
+) -> Value {
+    let sources_available =
+        vericore_policy::startup_context_policy::startup_identity_sources_available(
+            agents_available,
+            soul_available,
+        );
+    let identity_injected = vericore_policy::startup_context_policy::startup_identity_injected(
+        agents_injected,
+        soul_injected,
+    );
+    let contract_ok = vericore_policy::startup_context_policy::startup_identity_contract_ok(
+        sources_available,
+        identity_injected,
+    );
+
+    json!({
+        "checked": true,
+        "contract_ok": contract_ok,
+        "agents_available": agents_available,
+        "agents_injected": agents_injected,
+        "soul_available": soul_available,
+        "soul_injected": soul_injected,
+    })
 }
 
 fn trim_history(mut history: Vec<ChatMessage>, limit: usize) -> Vec<ChatMessage> {
@@ -2174,6 +2283,102 @@ fn collect_pending_artifacts(pending_dir: &Path) -> Result<Vec<Value>, String> {
     collect_mindlock_artifacts(pending_dir, usize::MAX)
 }
 
+fn build_mindlock_pending_view(pending_dir: &Path, artifact_id: &str) -> Result<Value, String> {
+    fs::create_dir_all(pending_dir).map_err(|e| {
+        format!(
+            "failed to create mindlock pending dir {}: {e}",
+            pending_dir.display()
+        )
+    })?;
+
+    let resolved_selector = resolve_pending_selector_id(pending_dir, artifact_id)?;
+    let artifact_path = resolve_pending_artifact_path(pending_dir, &resolved_selector)?;
+    let metadata = fs::metadata(&artifact_path).map_err(|e| {
+        format!(
+            "failed to read mindlock artifact metadata {}: {e}",
+            artifact_path.display()
+        )
+    })?;
+    let modified_ts = metadata
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    let name = artifact_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("unknown")
+        .to_string();
+    let id = artifact_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(name.as_str())
+        .to_string();
+
+    let meta_path = artifact_path.with_extension("meta.json");
+    let meta_value = fs::read(&meta_path)
+        .ok()
+        .and_then(|raw| serde_json::from_slice::<Value>(&raw).ok());
+    let target_path = meta_value
+        .as_ref()
+        .and_then(|v| v.get("target_path"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let reason = meta_value
+        .as_ref()
+        .and_then(|v| v.get("reason"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let reviewer_assessment = meta_value
+        .as_ref()
+        .and_then(|v| v.get("reviewer_assessment").cloned());
+
+    let (preview, preview_truncated, preview_binary) =
+        render_mindlock_preview(&artifact_path, MINDLOCK_VIEW_PREVIEW_MAX_CHARS);
+
+    let mut result = json!({
+        "id": id,
+        "name": name,
+        "path": artifact_path.display().to_string(),
+        "stage": "pending",
+        "size_bytes": metadata.len(),
+        "modified_ts": modified_ts,
+        "target_path": target_path,
+        "reason": reason,
+        "preview": preview,
+        "preview_truncated": preview_truncated,
+        "preview_binary": preview_binary,
+    });
+    if let Some(assessment) = reviewer_assessment {
+        result["reviewer_assessment"] = assessment;
+    }
+    Ok(result)
+}
+
+fn render_mindlock_preview(path: &Path, max_chars: usize) -> (String, bool, bool) {
+    let Ok(bytes) = fs::read(path) else {
+        return (
+            format!("(unable to read artifact {})", path.display()),
+            false,
+            false,
+        );
+    };
+    if bytes.contains(&0) {
+        return (
+            "(binary artifact; preview suppressed)".to_string(),
+            false,
+            true,
+        );
+    }
+
+    let text = String::from_utf8_lossy(&bytes);
+    let total_chars = text.chars().count();
+    let preview = truncate_chars(&text, max_chars);
+    (preview, total_chars > max_chars, false)
+}
+
 struct MemoryContextBlock {
     text: String,
     item_count: usize,
@@ -2740,9 +2945,22 @@ fn day_to_ts(day: &str) -> Option<i64> {
 
 #[cfg(test)]
 mod tests {
-    use super::trim_history;
+    use super::{build_startup_identity_contract_result, trim_history};
     use crate::llm::{ChatMessage, ToolCall};
     use serde_json::json;
+
+    #[test]
+    fn startup_identity_contract_passes_when_agents_and_soul_are_present() {
+        let value = build_startup_identity_contract_result(true, true, true, true);
+        assert_eq!(value["checked"], json!(true));
+        assert_eq!(value["contract_ok"], json!(true));
+    }
+
+    #[test]
+    fn startup_identity_contract_fails_when_soul_is_not_injected() {
+        let value = build_startup_identity_contract_result(true, true, true, false);
+        assert_eq!(value["contract_ok"], json!(false));
+    }
 
     #[test]
     fn trim_history_never_starts_with_tool_result() {

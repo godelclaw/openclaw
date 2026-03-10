@@ -318,6 +318,19 @@ export type SessionSkillSnapshot = {
   version?: number;
 };
 
+export type SessionStartupIdentityObserved = {
+  agents_available: boolean;
+  agents_injected: boolean;
+  soul_available: boolean;
+  soul_injected: boolean;
+};
+
+export type SessionStartupIdentityContract = SessionStartupIdentityObserved & {
+  checked: boolean;
+  contract_ok: boolean;
+  error?: string | null;
+};
+
 export type SessionSystemPromptReport = {
   source: "run" | "estimate";
   generatedAt: number;
@@ -351,9 +364,12 @@ export type SessionSystemPromptReport = {
     path: string;
     missing: boolean;
     rawChars: number;
+    injected?: boolean;
     injectedChars: number;
     truncated: boolean;
   }>;
+  startupIdentityObserved?: SessionStartupIdentityObserved;
+  startupIdentityContract?: SessionStartupIdentityContract;
   skills: {
     promptChars: number;
     entries: Array<{ name: string; blockChars: number }>;

@@ -55,6 +55,24 @@ describe("vericore impetus bridge helpers", () => {
     expect(channel).toBe("internal");
   });
 
+  it("maps operator webchat to terminal", () => {
+    const channel = deriveVeriCoreChannel(
+      makeCtx({
+        Surface: "webchat",
+        CommandAuthorized: true,
+        GatewayClientScopes: ["operator.admin"],
+      }),
+    );
+
+    expect(channel).toBe("terminal");
+  });
+
+  it("keeps non-operator webchat on api", () => {
+    const channel = deriveVeriCoreChannel(makeCtx({ Surface: "webchat" }));
+
+    expect(channel).toBe("api");
+  });
+
   it("builds stimulus payload from context", () => {
     const stimulus = buildVeriCoreStimulusInput(
       makeCtx({

@@ -141,6 +141,17 @@ type RegisterTelegramNativeCommandsParams = {
   opts: { token: string };
 };
 
+function shouldDeferToTelegramMessageHandler(commandName: string): boolean {
+  const normalized = normalizeTelegramCommandName(commandName);
+  return (
+    normalized === "mindlock" ||
+    normalized === "review" ||
+    normalized === "view" ||
+    normalized === "a" ||
+    normalized === "reject"
+  );
+}
+
 async function resolveTelegramCommandAuth(params: {
   msg: NonNullable<TelegramNativeCommandContext["message"]>;
   bot: Bot;
@@ -521,6 +532,12 @@ export const registerTelegramNativeCommands = ({
     } else {
       for (const command of nativeCommands) {
         const normalizedCommandName = normalizeTelegramCommandName(command.name);
+        if (shouldDeferToTelegramMessageHandler(normalizedCommandName)) {
+          logVerbose(
+            `telegram native command /${normalizedCommandName}: deferring to message handler fast-path`,
+          );
+          continue;
+        }
         bot.command(normalizedCommandName, async (ctx: TelegramNativeCommandContext) => {
           const msg = ctx.message;
           if (!msg) {

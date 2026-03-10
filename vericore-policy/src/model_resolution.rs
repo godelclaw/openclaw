@@ -248,15 +248,24 @@ mod tests {
     const GROK: u64 = 200;
 
     fn anthropic_opus() -> ModelRef {
-        ModelRef { provider: ANTHROPIC, model: OPUS }
+        ModelRef {
+            provider: ANTHROPIC,
+            model: OPUS,
+        }
     }
 
     fn anthropic_sonnet() -> ModelRef {
-        ModelRef { provider: ANTHROPIC, model: SONNET }
+        ModelRef {
+            provider: ANTHROPIC,
+            model: SONNET,
+        }
     }
 
     fn openrouter_grok() -> ModelRef {
-        ModelRef { provider: OPENROUTER, model: GROK }
+        ModelRef {
+            provider: OPENROUTER,
+            model: GROK,
+        }
     }
 
     #[test]

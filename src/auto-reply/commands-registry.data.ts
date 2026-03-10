@@ -280,9 +280,25 @@ function buildChatCommands(): ChatCommandDefinition[] {
       category: "management",
     }),
     defineChatCommand({
+      key: "view",
+      nativeName: "view",
+      description: "Show a preview of a pending mindlock item by artifact id or list index.",
+      textAlias: "/view",
+      acceptsArgs: true,
+      args: [
+        {
+          name: "artifact_id_or_index",
+          description: "Mindlock artifact id (or index from /review)",
+          type: "string",
+          required: true,
+        },
+      ],
+      category: "management",
+    }),
+    defineChatCommand({
       key: "approve",
       nativeName: "approve",
-      description: "Legacy exec approval command (mindlock uses /a).",
+      description: "Approve a pending exec approval request (mindlock uses /a).",
       textAlias: "/approve",
       acceptsArgs: true,
       category: "management",
