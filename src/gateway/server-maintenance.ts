@@ -66,11 +66,6 @@ export function startGatewayMaintenanceTimers(params: {
       .catch((err) => params.logHealth.error(`refresh failed: ${formatError(err)}`));
   }, HEALTH_REFRESH_INTERVAL_MS);
 
-  // Prime cache so first client gets a snapshot without waiting.
-  void params
-    .refreshGatewayHealthSnapshot({ probe: true })
-    .catch((err) => params.logHealth.error(`initial refresh failed: ${formatError(err)}`));
-
   // dedupe cache cleanup
   const dedupeCleanup = setInterval(() => {
     const AGENT_RUN_SEQ_MAX = 10_000;

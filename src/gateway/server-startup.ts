@@ -39,6 +39,7 @@ export async function startGatewaySidecars(params: {
   defaultWorkspaceDir: string;
   deps: CliDeps;
   startChannels: () => Promise<void>;
+  refreshHealthSnapshot: (opts?: { probe?: boolean }) => Promise<unknown>;
   log: { warn: (msg: string) => void };
   logHooks: {
     info: (msg: string) => void;
@@ -147,6 +148,11 @@ export async function startGatewaySidecars(params: {
   if (!skipChannels) {
     try {
       await params.startChannels();
+      try {
+        await params.refreshHealthSnapshot({ probe: false });
+      } catch (err) {
+        params.logChannels.error(`post-start health refresh failed: ${String(err)}`);
+      }
     } catch (err) {
       params.logChannels.error(`channel startup failed: ${String(err)}`);
     }

@@ -90,6 +90,11 @@ type ChannelManagerOptions = {
    * @see {@link ChannelGatewayContext.channelRuntime}
    */
   channelRuntime?: PluginRuntime["channel"];
+  onRuntimeChange?: (
+    channelId: ChannelId,
+    accountId: string,
+    snapshot: ChannelAccountSnapshot,
+  ) => void;
 };
 
 type StartChannelOptions = {
@@ -109,7 +114,7 @@ export type ChannelManager = {
 
 // Channel docking: lifecycle hooks (`plugin.gateway`) flow through this manager.
 export function createChannelManager(opts: ChannelManagerOptions): ChannelManager {
-  const { loadConfig, channelLogs, channelRuntimeEnvs, channelRuntime } = opts;
+  const { loadConfig, channelLogs, channelRuntimeEnvs, channelRuntime, onRuntimeChange } = opts;
 
   const channelStores = new Map<ChannelId, ChannelRuntimeStore>();
   // Tracks restart attempts per channel:account. Reset on successful start.
@@ -143,6 +148,7 @@ export function createChannelManager(opts: ChannelManagerOptions): ChannelManage
     const current = getRuntime(channelId, accountId);
     const next = { ...current, ...patch, accountId };
     store.runtimes.set(accountId, next);
+    onRuntimeChange?.(channelId, accountId, next);
     return next;
   };
 

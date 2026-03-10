@@ -104,7 +104,9 @@ import {
   getHealthVersion,
   getPresenceVersion,
   incrementPresenceVersion,
+  invalidateGatewayHealthSnapshot,
   refreshGatewayHealthSnapshot,
+  setHealthRuntimeSnapshotProvider,
 } from "./server/health-state.js";
 import { loadGatewayTlsRuntime } from "./server/tls.js";
 import {
@@ -623,9 +625,13 @@ export async function startGatewayServer(
     channelLogs,
     channelRuntimeEnvs,
     channelRuntime: createPluginRuntime().channel,
+    onRuntimeChange: () => {
+      invalidateGatewayHealthSnapshot();
+    },
   });
   const { getRuntimeSnapshot, startChannels, startChannel, stopChannel, markChannelLoggedOut } =
     channelManager;
+  setHealthRuntimeSnapshotProvider(getRuntimeSnapshot);
 
   if (!minimalTestGateway) {
     const machineDisplayName = await getMachineDisplayName();
@@ -890,6 +896,7 @@ export async function startGatewayServer(
       defaultWorkspaceDir,
       deps,
       startChannels,
+      refreshHealthSnapshot: refreshGatewayHealthSnapshot,
       log,
       logHooks,
       logChannels,
@@ -1010,6 +1017,7 @@ export async function startGatewayServer(
       if (diagnosticsEnabled) {
         stopDiagnosticHeartbeat();
       }
+      setHealthRuntimeSnapshotProvider(null);
       if (skillsRefreshTimer) {
         clearTimeout(skillsRefreshTimer);
         skillsRefreshTimer = null;

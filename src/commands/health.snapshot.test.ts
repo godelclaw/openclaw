@@ -149,11 +149,59 @@ describe("getHealthSnapshot", () => {
       channels: { telegram: { botToken: "t-1" } },
     });
     expect(telegram.configured).toBe(true);
+    expect((telegram as { tokenSource?: string }).tokenSource).toBe("config");
+    expect((telegram as { mode?: string }).mode).toBe("polling");
     expect(telegram.probe?.ok).toBe(true);
     expect(telegram.probe?.bot?.username).toBe("bot");
     expect(telegram.probe?.webhook?.url).toMatch(/^https:/);
     expect(calls.some((c) => c.includes("/getMe"))).toBe(true);
     expect(calls.some((c) => c.includes("/getWebhookInfo"))).toBe(true);
+  });
+
+  it("merges live runtime state into health snapshots", async () => {
+    testConfig = { channels: { telegram: { botToken: "t-1" } } };
+    testStore = {};
+    vi.stubEnv("DISCORD_BOT_TOKEN", "");
+
+    const snap = await getHealthSnapshot({
+      timeoutMs: 10,
+      probe: false,
+      runtimeSnapshot: {
+        channels: {
+          telegram: {
+            accountId: "default",
+            running: true,
+            lastStartAt: 123,
+            lastStopAt: null,
+            lastError: null,
+          },
+        },
+        channelAccounts: {
+          telegram: {
+            default: {
+              accountId: "default",
+              running: true,
+              lastStartAt: 123,
+              lastStopAt: null,
+              lastError: null,
+            },
+          },
+        },
+      },
+    });
+
+    const telegram = snap.channels.telegram as {
+      configured?: boolean;
+      running?: boolean;
+      lastStartAt?: number | null;
+      tokenSource?: string;
+      mode?: string | null;
+    };
+    expect(telegram.configured).toBe(true);
+    expect(telegram.running).toBe(true);
+    expect(telegram.lastStartAt).toBe(123);
+    expect(telegram.tokenSource).toBe("config");
+    expect(telegram.mode).toBe("polling");
   });
 
   it("treats telegram.tokenFile as configured", async () => {
