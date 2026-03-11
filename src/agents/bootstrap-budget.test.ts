@@ -38,12 +38,14 @@ describe("buildBootstrapInjectionStats", () => {
     expect(stats[0]).toMatchObject({
       name: "AGENTS.md",
       rawChars: 100,
+      injected: true,
       injectedChars: 100,
       truncated: false,
     });
     expect(stats[1]).toMatchObject({
       name: "SOUL.md",
       rawChars: 50,
+      injected: true,
       injectedChars: 20,
       truncated: true,
     });

@@ -148,7 +148,19 @@ function shouldDeferToTelegramMessageHandler(commandName: string): boolean {
     normalized === "review" ||
     normalized === "view" ||
     normalized === "a" ||
-    normalized === "reject"
+    normalized === "reject" ||
+    normalized === "memory-status" ||
+    normalized === "memory_status" ||
+    normalized === "memorystatus" ||
+    normalized === "memory-query" ||
+    normalized === "memory_query" ||
+    normalized === "memoryquery" ||
+    normalized === "memory-refine" ||
+    normalized === "memory_refine" ||
+    normalized === "memoryrefine" ||
+    normalized === "memory-promote" ||
+    normalized === "memory_promote" ||
+    normalized === "memorypromote"
   );
 }
 

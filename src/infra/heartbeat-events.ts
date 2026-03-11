@@ -1,21 +1,8 @@
+import { appendHeartbeatAuditLog, type HeartbeatAuditEntry } from "./heartbeat-audit-log.js";
+
 export type HeartbeatIndicatorType = "ok" | "alert" | "error";
 
-export type HeartbeatEventPayload = {
-  ts: number;
-  status: "sent" | "ok-empty" | "ok-token" | "skipped" | "failed";
-  to?: string;
-  accountId?: string;
-  preview?: string;
-  durationMs?: number;
-  hasMedia?: boolean;
-  reason?: string;
-  /** The channel this heartbeat was sent to. */
-  channel?: string;
-  /** Whether the message was silently suppressed (showOk: false). */
-  silent?: boolean;
-  /** Indicator type for UI status display. */
-  indicatorType?: HeartbeatIndicatorType;
-};
+export type HeartbeatEventPayload = HeartbeatAuditEntry;
 
 export function resolveIndicatorType(
   status: HeartbeatEventPayload["status"],
@@ -39,6 +26,7 @@ const listeners = new Set<(evt: HeartbeatEventPayload) => void>();
 export function emitHeartbeatEvent(evt: Omit<HeartbeatEventPayload, "ts">) {
   const enriched: HeartbeatEventPayload = { ts: Date.now(), ...evt };
   lastHeartbeat = enriched;
+  void appendHeartbeatAuditLog(enriched);
   for (const listener of listeners) {
     try {
       listener(enriched);

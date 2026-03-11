@@ -191,11 +191,11 @@ The bridge implementation exposed several verification gaps worth documenting:
 \item Legacy Rust config fields (\texttt{api\_base}, \texttt{api\_key\_env}, \texttt{model}) caused a silent routing bug: VeriCore appeared to work but was hitting OpenRouter directly (returning HTTP 402) instead of going through the bridge. The fix was to purge these fields entirely.
 \item A string comparison for fallback detection (\texttt{configured\_model != resolved\_model}) produced false positives on every clean run because the two fields use different naming conventions. The fix was to gate on the boolean \texttt{fallback\_used} field instead.
 \item The security reviewer path through the bridge has not yet been E2E tested---it is a known gap.
-\item Operational tooling can still drift from the live state directory. In the current deployment, CLI health/status probes must target the active \texttt{.BGIseed-state} tree explicitly, and the current \texttt{gateway health} report can still mislabel Telegram as not running even when the provider is live. These are reporting and tooling issues outside the proof boundary.
+\item Operational tooling can still drift from the live state directory if operators bypass the repo-local wrappers or force legacy environment overrides. The default repo-root CLI path and the live \texttt{gateway health} snapshot have been repaired, but state-dir hygiene remains an operational concern outside the proof boundary.
 \end{itemize}
 
 \section{What Is Verified Today}
-The crate \texttt{vericore-policy} currently verifies 162 functions with 0 errors across 14 modules. The honest split is now three-way: runtime-called kernel predicates, runtime-called boundary validators, and verified reference specs.
+The crate \texttt{vericore-policy} currently verifies 187 functions with 0 errors across 16 modules. The honest split is now three-way: runtime-called kernel predicates, runtime-called boundary validators, and verified reference specs.
 
 \subsection{Verified Runtime Kernel}
 The following modules are production-wired: the same functions that Verus checks are the ones \texttt{vericore-core} calls for live policy decisions.
@@ -206,11 +206,15 @@ The following modules are production-wired: the same functions that Verus checks
 \end{itemize}
 
 \subsection{Verified Runtime Boundary Validators}
-Two additional verified modules are now called directly by the runtime, but they validate facts reported by TypeScript rather than replacing TypeScript logic.
+Four additional verified modules are now called directly by the runtime, but they validate facts reported by TypeScript rather than replacing TypeScript logic.
 
 \paragraph{Session model policy} (\texttt{session\_model\_policy.rs}). Called from the Rust LLM bridge client after each completion response. Proves metadata completeness, fallback visibility, provider-change flag consistency, allowlist enforcement, and override consistency. This is a boundary contract: it checks whether the bridge response is coherent enough for Rust to trust. It does \emph{not} prove that the TS runtime selected the semantically correct model end to end.
 
 \paragraph{Startup context identity} (\texttt{startup\_context\_policy.rs}). Called through \texttt{startup\_identity\_validate} and surfaced in the startup/context report. Proves that AGENTS and SOUL availability/injection booleans combine into a simple contract. This is again a boundary validator over TS-observed facts, not an independent reconstruction of prompt assembly.
+
+\paragraph{Heartbeat sync} (\texttt{heartbeat\_sync\_policy.rs}). Called through \texttt{heartbeat\_sync\_validate} and surfaced in the context report. Proves that canonical and mirrored \texttt{HEARTBEAT.md} copies are both present, the mirror matches the canonical file, and the configured heartbeat prompt defers to \texttt{HEARTBEAT.md} rather than stale duplicated wording. This remains a boundary validator over TS-observed facts rather than a proof of the full heartbeat runner.
+
+\paragraph{Heartbeat continuity context} (\texttt{heartbeat\_context\_policy.rs}). Called through \texttt{heartbeat\_context\_validate} from the heartbeat runner and the context report. Proves that the recent-turn window stays bounded, a reservable recent main Telegram turn is preserved when present, content-bearing heartbeats remain visible in the main window, no-op heartbeats stay out of that main window, and the separate heartbeat trace stays bounded and oldest-first. This is a boundary validator over TS-selected continuity facts, not a proof of full prompt assembly.
 
 \subsection{Verified Reference Specs}
 Nine additional modules provide proved reference specs. These are not the authoritative runtime kernels; correspondence with runtime behavior is established by tests, runtime checks, and review.
@@ -252,6 +256,8 @@ The current proof boundary covers all deterministic policy decision surfaces:
 \item ingress allow/deny decisions over normalized target classes (monotonicity, full capability),
 \item session-model boundary validation over bridge-reported metadata (completeness, fallback visibility, override consistency, allowlist enforcement),
 \item startup-identity boundary validation over AGENTS/SOUL availability and injection facts,
+\item heartbeat-sync boundary validation over canonical/mirror file coherence and file-following prompt facts,
+\item heartbeat continuity boundary validation over the recent-turn window and separate heartbeat trace,
 \item mindlock state machine (terminal states, valid transitions, source validation, cleanup eligibility),
 \item receipt and human-approval conditions for promotion (tamper detection, at-least-one-auth),
 \item egress flow control (transitivity, private-to-public denial, review triggers),
@@ -268,7 +274,7 @@ The following are explicitly \emph{outside} the proof boundary:
 \item filesystem race handling in detail,
 \item reviewer prompt quality,
 \item RAG relevance,
-\item TS runtime state-dir selection and health-report accuracy,
+\item exact OpenClaw prompt assembly beyond the validated continuity-window facts,
 \item social or stylistic policy guidance.
 \end{itemize}
 
@@ -307,11 +313,11 @@ The correct near-term sequence is now:
 \item \textbf{(done)} default channel/context/integrity mapping verified and production-wired,
 \item \textbf{(done)} single-driver completions bridge wired so Rust owns the turn loop while OpenClaw owns model resolution and auth,
 \item \textbf{(done)} MCP tool broker wired so Rust can call brokered tools while OpenClaw owns MCP runtime and hooks,
-\item \textbf{(done)} runtime boundary validators for session-model metadata and startup identity,
+\item \textbf{(done)} runtime boundary validators for session-model metadata, startup identity, heartbeat sync, and heartbeat continuity,
 \item E2E test the security reviewer path through the completions bridge (still a known gap),
 \item harden the gateway-to-daemon authenticity boundary,
 \item strengthen TS$\leftrightarrow$Rust correspondence tests for model selection, tool broker behavior, and operator-surface routing,
-\item reduce operator/reporting drift (for example, health-report accuracy and non-Telegram private parent surfaces), and
+\item reduce remaining operator/runtime drift (for example, non-Telegram private parent surfaces and transport/reporting edge cases), and
 \item consolidate enum types and capability identifiers so production uses verified representations more directly.
 \end{enumerate}
 
@@ -324,10 +330,166 @@ Testing is still required. Verus does not replace integration tests for socket b
 \end{itemize}
 
 \section{Conclusion}
-VeriCore is now past the point where detached proof sketches alone are the main value. As of March 10, 2026, \texttt{vericore-policy} verifies 162 functions with 0 errors across 14 modules spanning a runtime-called kernel, runtime-called boundary validators, and verified reference specs.
+VeriCore is now past the point where detached proof sketches alone are the main value. As of March 11, 2026, \texttt{vericore-policy} verifies 187 functions with 0 errors across 16 modules spanning a runtime-called kernel, runtime-called boundary validators, and verified reference specs.
 
-For the runtime kernel (tiers, channels, ingress), the verified predicates are authoritative runtime logic. For the boundary validators (session-model metadata and startup identity), the verified predicates are authoritative checks on TS-reported facts at the Rust seam. For the reference specs (model resolution, mindlock, receipt, egress, gate chain, bridge contracts, tool broker, tool policy, and compositions), the invariants are stated precisely and proved consistent, serving as regression guards and precise targets for future runtime wiring.
+For the runtime kernel (tiers, channels, ingress), the verified predicates are authoritative runtime logic. For the boundary validators (session-model metadata, startup identity, heartbeat sync, and heartbeat continuity), the verified predicates are authoritative checks on TS-reported facts at the Rust seam. For the reference specs (model resolution, mindlock, receipt, egress, gate chain, bridge contracts, tool broker, tool policy, and compositions), the invariants are stated precisely and proved consistent, serving as regression guards and precise targets for future runtime wiring.
 
 The honest trust story is therefore layered rather than absolute. Formal verification covers the deterministic kernel and some key seam validators. Tests and review still carry the transport, OpenClaw runtime, MCP lifecycle, UX routing, and other operational boundaries. That combination---verified deterministic policy for the runtime kernel, verified boundary contracts for the Rust/TS seam, verified reference specs for adjacent surfaces, and tested transport and operational boundaries---is the strongest realistic path for this architecture.
+
+\appendix
+
+\section{Core Agent Architecture}
+This appendix records the deployed operational shape as of March 11, 2026. It distinguishes the \emph{normal single-driver message path}, where VeriCore owns the turn loop, from the \emph{heartbeat path}, which is currently synthesized and run inside OpenClaw rather than entering through VeriCore first.
+
+\subsection{A.1 Normal Interactive Turn}
+\begin{lstlisting}[style=code]
+Human / channel stimulus
+    |
+    v
+Telegram / web / API / internal surface
+    |
+    v
+OpenClaw gateway ingress (TS)
+  - parse surface metadata
+  - resolve session key / agent binding
+  - normalize inbound context
+    |
+    v
+VeriCore daemon (Rust)
+  - assign channel
+  - map channel -> ContextTier -> IntegrityTier
+  - run gate chain / ingress policy / audit logic
+  - own the main turn loop
+    |
+    +------------------------------+
+    |                              |
+    | completion needed            | brokered tool needed
+    v                              v
+Completions bridge             Tool broker bridge
+  (Unix socket)                  (Unix socket)
+    |                              |
+    v                              v
+OpenClaw completions server    OpenClaw tool-broker server
+  - session model override       - per-agent MCP tool catalog
+  - provider/model resolution    - OpenClaw hook path
+  - auth profile selection       - MCP execution
+  - fallback chain               - stable capability ids
+    |                              |
+    v                              v
+LLM provider(s)                MCP runtimes / tools
+                                  - lean-lsp
+                                  - Tavily
+                                  - future brokers
+
+Shared context visible to the LLM for a normal turn:
+  1. OpenClaw system prompt
+  2. injected workspace files (AGENTS.md, SOUL.md, TOOLS.md,
+     IDENTITY.md, USER.md, HEARTBEAT.md, MEMORY.md, etc., budgeted)
+  3. session history / thread context / system events
+  4. current inbound user message
+
+Execution / output path:
+LLM/tool result -> VeriCore action dispatch -> native tools or brokered tools
+               -> mindlock / audit / review when required
+               -> OpenClaw outbound routing -> Telegram / web / other surface
+\end{lstlisting}
+
+\subsection{A.2 Heartbeat Turn}
+\begin{lstlisting}[style=code]
+15-minute scheduler + active-hours gate
+    |
+    v
+OpenClaw heartbeat runner (TS)
+  - skip during quiet hours
+  - skip if main queue busy
+  - skip if HEARTBEAT.md exists but is effectively empty
+  - choose heartbeat session (default: agent main session)
+    |
+    v
+Synthetic inbound heartbeat message
+  Body =
+    configured heartbeat prompt
+    + current-time line
+  Provider = "heartbeat"
+  SessionKey = main session (unless overridden)
+    |
+    v
+OpenClaw getReplyFromConfig(...)
+  - same main agent runtime path as ordinary OpenClaw turns
+  - NOT routed through VeriCore first
+    |
+    v
+Embedded agent run / system prompt assembly
+  - full bootstrap context by default
+  - lightweight mode only if heartbeat.lightContext = true
+  - current deployment uses full mode
+    |
+    v
+LLM sees:
+  1. system prompt with tool list, runtime, heartbeat instructions
+  2. Project Context with injected workspace files, including
+     AGENTS.md, SOUL.md, HEARTBEAT.md, and other bootstrap files
+  3. surviving session history for the chosen session key
+  4. deterministic continuity context assembled by TS
+     and boundary-validated by VeriCore:
+       - Recent completed turns block (limit 5)
+       - reserve one recent main Telegram/Zar turn when available
+       - reserve one recent content-bearing heartbeat when available
+       - separate heartbeat trace block (configurable traceLimit; default 32)
+       - no-op heartbeats stay in the trace, not the main turn window
+  5. the synthetic user heartbeat message:
+       "Heartbeat. Read HEARTBEAT.md and follow it calmly.
+        If there is no clear call to action,
+        reply HEARTBEAT_OK."
+       plus the appended current time line
+
+Reply handling:
+  - HEARTBEAT_OK / empty reply -> may be pruned from transcript
+  - nontrivial reply -> delivered to configured heartbeat target
+                       or retained in-session if target = none
+\end{lstlisting}
+
+\subsection{A.3 Bootstrap and Identity Files}
+\begin{lstlisting}[style=code]
+Workspace bootstrap files (candidate set)
+  AGENTS.md
+  SOUL.md
+  TOOLS.md
+  IDENTITY.md
+  USER.md
+  HEARTBEAT.md
+  BOOTSTRAP.md
+  MEMORY.md / memory.md
+  extra configured bootstrap files
+
+Load path:
+workspace -> bootstrap file resolver -> hook overrides -> char-budget truncation
+          -> "Project Context" section of the system prompt
+
+Compaction path:
+session compaction -> bounded AGENTS.md + SOUL.md reinjection
+                   -> post-compaction context refresh event
+\end{lstlisting}
+
+\subsection{A.4 Trust Boundary Summary}
+\begin{lstlisting}[style=code]
+Verus-checked and runtime-called:
+  - channel/context/integrity kernel
+  - ingress policy
+  - startup identity boundary validator
+  - heartbeat sync boundary validator
+  - heartbeat context boundary validator
+  - session-model boundary validator
+
+Runtime-called but not fully proved end-to-end:
+  - TypeScript heartbeat runner and exact prompt assembly
+  - Telegram / web command routing
+  - model override persistence
+  - MCP lifecycle and transport health
+
+Important current asymmetry:
+  interactive parent / user turns -> VeriCore-first
+  heartbeat turns                 -> OpenClaw heartbeat runner first
+\end{lstlisting}
 
 \end{document}

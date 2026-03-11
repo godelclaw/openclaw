@@ -1,7 +1,10 @@
+import fs from "node:fs/promises";
+import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as replyModule from "../auto-reply/reply.js";
 import type { OpenClawConfig } from "../config/config.js";
 import { runHeartbeatOnce } from "./heartbeat-runner.js";
+import { appendHeartbeatTurnLog } from "./recent-turn-window.js";
 import {
   seedMainSessionStore,
   setupTelegramHeartbeatPluginRuntimeForTests,
@@ -151,6 +154,158 @@ describe("Ghost reminder bug (issue #13317)", () => {
     expect(calledCtx?.Body).not.toContain("scheduled reminder has been triggered");
     expect(calledCtx?.Body).not.toContain("relay this reminder");
     expect(sendTelegram).toHaveBeenCalled();
+  });
+
+  it("injects recent completed turns into the heartbeat prompt", async () => {
+    await withTempHeartbeatSandbox(async ({ tmpDir, storePath }) => {
+      const previousStateDir = process.env.OPENCLAW_STATE_DIR;
+      process.env.OPENCLAW_STATE_DIR = tmpDir;
+      try {
+        const getReplySpy = vi
+          .spyOn(replyModule, "getReplyFromConfig")
+          .mockResolvedValue({ text: "HEARTBEAT_OK" });
+        const cfg: OpenClawConfig = {
+          agents: {
+            defaults: {
+              workspace: tmpDir,
+              heartbeat: {
+                every: "5m",
+                target: "telegram",
+              },
+            },
+          },
+          channels: { telegram: { allowFrom: ["*"] } },
+          session: { store: storePath },
+        };
+        await seedMainSessionStore(storePath, cfg, {
+          lastChannel: "telegram",
+          lastProvider: "telegram",
+          lastTo: "-100155462274",
+        });
+        const auditDir = path.join(tmpDir, "memory", "history", "audit");
+        await fs.mkdir(auditDir, { recursive: true });
+        await fs.writeFile(
+          path.join(auditDir, "2026-03-11.jsonl"),
+          JSON.stringify({
+            ts: 1_700_000_001,
+            channel: "telegram",
+            kind: "driver_turn",
+            session_key: "agent:main:main",
+            user_text: "What happened with memory architecture?",
+            assistant_text: "We fixed the CLI footgun and should now add a recent-turn window.",
+          }) + "\n",
+          "utf-8",
+        );
+        await appendHeartbeatTurnLog(
+          {
+            ts: 1_700_000_001_500,
+            sessionKey: "agent:main:main",
+            status: "ok-token",
+            userText: "Heartbeat",
+            assistantText: "HEARTBEAT_OK",
+          },
+          tmpDir,
+        );
+
+        await runHeartbeatOnce({
+          cfg,
+          agentId: "main",
+          reason: "interval",
+          deps: {
+            sendTelegram: vi.fn().mockResolvedValue({ messageId: "m1", chatId: "c1" }),
+          },
+        });
+
+        const calledCtx = getReplySpy.mock.calls[0]?.[0] as { Body?: string };
+        expect(calledCtx.Body).toContain("Recent completed turns");
+        expect(calledCtx.Body).toContain("Heartbeat trace");
+        expect(calledCtx.Body).toContain("What happened with memory architecture?");
+        expect(calledCtx.Body).toContain(
+          "We fixed the CLI footgun and should now add a recent-turn window.",
+        );
+        expect(calledCtx.Body).toContain("HEARTBEAT_OK");
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      } finally {
+        if (previousStateDir === undefined) {
+          delete process.env.OPENCLAW_STATE_DIR;
+        } else {
+          process.env.OPENCLAW_STATE_DIR = previousStateDir;
+        }
+      }
+    });
+  });
+
+  it("respects configured heartbeat traceLimit", async () => {
+    await withTempHeartbeatSandbox(async ({ tmpDir, storePath }) => {
+      const previousStateDir = process.env.OPENCLAW_STATE_DIR;
+      process.env.OPENCLAW_STATE_DIR = tmpDir;
+      try {
+        const getReplySpy = vi
+          .spyOn(replyModule, "getReplyFromConfig")
+          .mockResolvedValue({ text: "HEARTBEAT_OK" });
+        const cfg: OpenClawConfig = {
+          agents: {
+            defaults: {
+              workspace: tmpDir,
+              heartbeat: {
+                every: "5m",
+                target: "telegram",
+                traceLimit: 1,
+              },
+            },
+          },
+          channels: { telegram: { allowFrom: ["*"] } },
+          session: { store: storePath },
+        };
+        await seedMainSessionStore(storePath, cfg, {
+          lastChannel: "telegram",
+          lastProvider: "telegram",
+          lastTo: "-100155462274",
+        });
+        await appendHeartbeatTurnLog(
+          {
+            ts: 1_700_000_001_000,
+            sessionKey: "agent:main:main",
+            status: "ok-token",
+            userText: "Heartbeat",
+            assistantText: "older heartbeat",
+          },
+          tmpDir,
+        );
+        await appendHeartbeatTurnLog(
+          {
+            ts: 1_700_000_002_000,
+            sessionKey: "agent:main:main",
+            status: "ok-token",
+            userText: "Heartbeat",
+            assistantText: "newer heartbeat",
+          },
+          tmpDir,
+        );
+
+        await runHeartbeatOnce({
+          cfg,
+          agentId: "main",
+          reason: "interval",
+          deps: {
+            sendTelegram: vi.fn().mockResolvedValue({ messageId: "m1", chatId: "c1" }),
+          },
+        });
+
+        const calledCtx = getReplySpy.mock.calls[0]?.[0] as { Body?: string };
+        expect(calledCtx.Body).toContain("Heartbeat trace");
+        const traceSection = calledCtx.Body?.split("Heartbeat trace")[1] ?? "";
+        expect(traceSection).toContain("newer heartbeat");
+        expect(traceSection).not.toContain("older heartbeat");
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      } finally {
+        if (previousStateDir === undefined) {
+          delete process.env.OPENCLAW_STATE_DIR;
+        } else {
+          process.env.OPENCLAW_STATE_DIR = previousStateDir;
+        }
+      }
+    });
   });
 
   it("uses CRON_EVENT_PROMPT when an actionable cron event exists", async () => {

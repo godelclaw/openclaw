@@ -33,6 +33,7 @@ export const HeartbeatSchema = z
     prompt: z.string().optional(),
     ackMaxChars: z.number().int().nonnegative().optional(),
     suppressToolErrorWarnings: z.boolean().optional(),
+    traceLimit: z.number().int().nonnegative().optional(),
     lightContext: z.boolean().optional(),
   })
   .strict()

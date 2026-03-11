@@ -467,6 +467,8 @@ export const FIELD_LABELS: Record<string, string> = {
   "agents.defaults.heartbeat.directPolicy": "Heartbeat Direct Policy",
   "agents.list.*.heartbeat.directPolicy": "Heartbeat Direct Policy",
   "agents.defaults.heartbeat.suppressToolErrorWarnings": "Heartbeat Suppress Tool Error Warnings",
+  "agents.defaults.heartbeat.traceLimit": "Heartbeat Trace Limit",
+  "agents.list[].heartbeat.traceLimit": "Heartbeat Trace Limit",
   "agents.defaults.sandbox.browser.network": "Sandbox Browser Network",
   "agents.defaults.sandbox.browser.cdpSourceRange": "Sandbox Browser CDP Source Port Range",
   "agents.defaults.sandbox.docker.dangerouslyAllowContainerNamespaceJoin":

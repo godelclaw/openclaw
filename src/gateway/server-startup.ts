@@ -23,6 +23,10 @@ import { isTruthyEnvValue } from "../infra/env.js";
 import type { loadOpenClawPlugins } from "../plugins/loader.js";
 import { type PluginServicesHandle, startPluginServices } from "../plugins/services.js";
 import { startCompletionsServer } from "../vericore/completions-server.js";
+import {
+  syncHeartbeatArtifacts,
+  validateHeartbeatSyncContract,
+} from "../vericore/heartbeat-sync.js";
 import { startToolBrokerServer } from "../vericore/tool-broker-server.js";
 import { startBrowserControlServerIfEnabled } from "./server-browser.js";
 import {
@@ -62,6 +66,31 @@ export async function startGatewaySidecars(params: {
     }
   } catch (err) {
     params.log.warn(`session lock cleanup failed on startup: ${String(err)}`);
+  }
+
+  try {
+    const syncResult = await syncHeartbeatArtifacts({
+      cfg: params.cfg,
+      workspaceDir: params.defaultWorkspaceDir,
+      warn: (message) => params.log.warn(message),
+    });
+    if (syncResult.mirrorUpdated || syncResult.promptUpdated) {
+      params.log.warn(
+        `heartbeat sync repaired startup drift: mirrorUpdated=${syncResult.mirrorUpdated} promptUpdated=${syncResult.promptUpdated}`,
+      );
+    }
+    const contract = await validateHeartbeatSyncContract({
+      cfg: params.cfg,
+      workspaceDir: params.defaultWorkspaceDir,
+      options: { timeoutMs: 750, disableSpawnFallback: true },
+    });
+    if (contract && (!contract.checked || !contract.contract_ok)) {
+      params.log.warn(
+        `heartbeat sync contract failed: checked=${contract.checked} canonical=${contract.canonical_available} mirror=${contract.mirror_available} match=${contract.mirror_matches} promptFile=${contract.prompt_uses_file_reference} promptLegacyGas=${contract.prompt_mentions_legacy_gas}${contract.error ? ` error=${contract.error}` : ""}`,
+      );
+    }
+  } catch (err) {
+    params.log.warn(`heartbeat sync startup check failed: ${String(err)}`);
   }
 
   // Start OpenClaw browser control server (unless disabled via config).

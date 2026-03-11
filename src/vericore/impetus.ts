@@ -79,6 +79,10 @@ export type VeriCoreMemoryStatus = {
     weekly_files: number;
     daily_merged_files: number;
   };
+  audit?: {
+    root: string;
+    daily_files: number;
+  };
 };
 
 export type VeriCoreMemoryQueryHit = {
@@ -195,6 +199,40 @@ export type VeriCoreStartupIdentityObservedInput = {
 };
 
 export type VeriCoreStartupIdentityContractResult = VeriCoreStartupIdentityObservedInput & {
+  checked: boolean;
+  contract_ok: boolean;
+  error?: string | null;
+};
+
+export type VeriCoreHeartbeatSyncObservedInput = {
+  canonical_available: boolean;
+  mirror_available: boolean;
+  mirror_matches: boolean;
+  prompt_uses_file_reference: boolean;
+  prompt_mentions_legacy_gas: boolean;
+};
+
+export type VeriCoreHeartbeatSyncContractResult = VeriCoreHeartbeatSyncObservedInput & {
+  checked: boolean;
+  contract_ok: boolean;
+  error?: string | null;
+};
+
+export type VeriCoreHeartbeatContextObservedInput = {
+  recent_turn_count: number;
+  recent_turn_limit: number;
+  reserved_candidate_present: boolean;
+  reserved_included: boolean;
+  content_heartbeat_candidate_present: boolean;
+  content_heartbeat_included: boolean;
+  noop_heartbeat_in_recent_turns: boolean;
+  heartbeat_trace_count: number;
+  heartbeat_trace_limit: number;
+  heartbeat_trace_oldest_first: boolean;
+  heartbeat_trace_only_heartbeat_entries: boolean;
+};
+
+export type VeriCoreHeartbeatContextContractResult = VeriCoreHeartbeatContextObservedInput & {
   checked: boolean;
   contract_ok: boolean;
   error?: string | null;
@@ -354,7 +392,9 @@ async function runVeriCoreSocketMethod<T>(
     | "mindlock_view"
     | "mindlock_approve"
     | "mindlock_reject"
-    | "startup_identity_validate",
+    | "startup_identity_validate"
+    | "heartbeat_sync_validate"
+    | "heartbeat_context_validate",
   stimulus: VeriCoreStimulusInput | undefined,
   query: string | undefined,
   embed: boolean | undefined,
@@ -901,6 +941,64 @@ export async function runVeriCoreStartupIdentityValidate(
     undefined,
     validateOptions,
     observed,
+  );
+}
+
+export async function runVeriCoreHeartbeatSyncValidate(
+  observed: VeriCoreHeartbeatSyncObservedInput,
+  options: VeriCoreBridgeOptions = {},
+): Promise<VeriCoreHeartbeatSyncContractResult> {
+  const validateOptions = {
+    ...options,
+    timeoutMs: options.timeoutMs ?? DEFAULT_DECIDE_TIMEOUT_MS,
+  };
+
+  return await runVeriCoreSocketMethod<VeriCoreHeartbeatSyncContractResult>(
+    "heartbeat_sync_validate",
+    undefined,
+    undefined,
+    undefined,
+    validateOptions,
+    {
+      heartbeat_canonical_available: observed.canonical_available,
+      heartbeat_mirror_available: observed.mirror_available,
+      heartbeat_mirror_matches: observed.mirror_matches,
+      heartbeat_prompt_uses_file_reference: observed.prompt_uses_file_reference,
+      heartbeat_prompt_mentions_legacy_gas: observed.prompt_mentions_legacy_gas,
+    },
+  );
+}
+
+export async function runVeriCoreHeartbeatContextValidate(
+  observed: VeriCoreHeartbeatContextObservedInput,
+  options: VeriCoreBridgeOptions = {},
+): Promise<VeriCoreHeartbeatContextContractResult> {
+  const validateOptions = {
+    ...options,
+    timeoutMs: options.timeoutMs ?? DEFAULT_DECIDE_TIMEOUT_MS,
+  };
+
+  return await runVeriCoreSocketMethod<VeriCoreHeartbeatContextContractResult>(
+    "heartbeat_context_validate",
+    undefined,
+    undefined,
+    undefined,
+    validateOptions,
+    {
+      heartbeat_context_recent_turn_count: observed.recent_turn_count,
+      heartbeat_context_recent_turn_limit: observed.recent_turn_limit,
+      heartbeat_context_reserved_candidate_present: observed.reserved_candidate_present,
+      heartbeat_context_reserved_included: observed.reserved_included,
+      heartbeat_context_content_heartbeat_candidate_present:
+        observed.content_heartbeat_candidate_present,
+      heartbeat_context_content_heartbeat_included: observed.content_heartbeat_included,
+      heartbeat_context_noop_heartbeat_in_recent_turns: observed.noop_heartbeat_in_recent_turns,
+      heartbeat_context_trace_count: observed.heartbeat_trace_count,
+      heartbeat_context_trace_limit: observed.heartbeat_trace_limit,
+      heartbeat_context_trace_oldest_first: observed.heartbeat_trace_oldest_first,
+      heartbeat_context_trace_only_heartbeat_entries:
+        observed.heartbeat_trace_only_heartbeat_entries,
+    },
   );
 }
 

@@ -33,6 +33,8 @@
 //!
 //! - `session_model_policy`: bridge model resolution contract, fallback visibility, allowlist
 //! - `startup_context_policy`: AGENTS/SOUL startup identity boundary contract
+//! - `heartbeat_sync_policy`: HEARTBEAT.md canonical/mirror coherence and prompt contract
+//! - `heartbeat_context_policy`: recent-turn window and heartbeat-trace continuity contract
 //!
 //! ## Cross-module composition proofs
 //!
@@ -42,6 +44,8 @@ pub mod channels;
 pub mod compositions;
 pub mod egress;
 pub mod gate_chain;
+pub mod heartbeat_context_policy;
+pub mod heartbeat_sync_policy;
 pub mod ingress;
 pub mod llm_bridge;
 pub mod mindlock;

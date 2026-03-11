@@ -14,6 +14,7 @@ export type BootstrapInjectionStat = {
   path: string;
   missing: boolean;
   rawChars: number;
+  injected?: boolean;
   injectedChars: number;
   truncated: boolean;
 };
@@ -148,13 +149,15 @@ export function buildBootstrapInjectionStats(params: {
       (pathValue ? injectedByPath.get(pathValue) : undefined) ??
       injectedByPath.get(file.name) ??
       injectedByBaseName.get(file.name);
-    const injectedChars = injected ? injected.length : 0;
+    const injectedPresent = injected !== undefined;
+    const injectedChars = typeof injected === "string" ? injected.length : 0;
     const truncated = !file.missing && injectedChars < rawChars;
     return {
       name: file.name,
       path: pathValue || file.name,
       missing: file.missing,
       rawChars,
+      injected: injectedPresent,
       injectedChars,
       truncated,
     };

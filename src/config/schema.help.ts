@@ -228,6 +228,10 @@ export const FIELD_HELP: Record<string, string> = {
     "Suppress tool error warning payloads during heartbeat runs.",
   "agents.list[].heartbeat.suppressToolErrorWarnings":
     "Suppress tool error warning payloads during heartbeat runs.",
+  "agents.defaults.heartbeat.traceLimit":
+    "Maximum number of heartbeat trace entries injected for continuity. Set 0 to disable the trace block.",
+  "agents.list[].heartbeat.traceLimit":
+    "Maximum number of heartbeat trace entries injected for continuity. Set 0 to disable the trace block.",
   browser:
     "Browser runtime controls for local or remote CDP attachment, profile routing, and screenshot/snapshot behavior. Keep defaults unless your automation workflow requires custom browser transport settings.",
   "browser.enabled":

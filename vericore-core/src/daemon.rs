@@ -80,6 +80,38 @@ pub struct DaemonRequest {
     pub soul_available: Option<bool>,
     #[serde(default)]
     pub soul_injected: Option<bool>,
+    #[serde(default)]
+    pub heartbeat_canonical_available: Option<bool>,
+    #[serde(default)]
+    pub heartbeat_mirror_available: Option<bool>,
+    #[serde(default)]
+    pub heartbeat_mirror_matches: Option<bool>,
+    #[serde(default)]
+    pub heartbeat_prompt_uses_file_reference: Option<bool>,
+    #[serde(default)]
+    pub heartbeat_prompt_mentions_legacy_gas: Option<bool>,
+    #[serde(default)]
+    pub heartbeat_context_recent_turn_count: Option<usize>,
+    #[serde(default)]
+    pub heartbeat_context_recent_turn_limit: Option<usize>,
+    #[serde(default)]
+    pub heartbeat_context_reserved_candidate_present: Option<bool>,
+    #[serde(default)]
+    pub heartbeat_context_reserved_included: Option<bool>,
+    #[serde(default)]
+    pub heartbeat_context_content_heartbeat_candidate_present: Option<bool>,
+    #[serde(default)]
+    pub heartbeat_context_content_heartbeat_included: Option<bool>,
+    #[serde(default)]
+    pub heartbeat_context_noop_heartbeat_in_recent_turns: Option<bool>,
+    #[serde(default)]
+    pub heartbeat_context_trace_count: Option<usize>,
+    #[serde(default)]
+    pub heartbeat_context_trace_limit: Option<usize>,
+    #[serde(default)]
+    pub heartbeat_context_trace_oldest_first: Option<bool>,
+    #[serde(default)]
+    pub heartbeat_context_trace_only_heartbeat_entries: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -282,6 +314,148 @@ async fn dispatch_request(request: DaemonRequest, shared: &SharedState) -> Daemo
                 ),
             )
         }
+        "heartbeat_sync_validate" => {
+            let Some(canonical_available) = request.heartbeat_canonical_available else {
+                return DaemonResponse::err(
+                    request.id,
+                    "missing heartbeat_canonical_available for method=heartbeat_sync_validate",
+                );
+            };
+            let Some(mirror_available) = request.heartbeat_mirror_available else {
+                return DaemonResponse::err(
+                    request.id,
+                    "missing heartbeat_mirror_available for method=heartbeat_sync_validate",
+                );
+            };
+            let Some(mirror_matches) = request.heartbeat_mirror_matches else {
+                return DaemonResponse::err(
+                    request.id,
+                    "missing heartbeat_mirror_matches for method=heartbeat_sync_validate",
+                );
+            };
+            let Some(prompt_uses_file_reference) = request.heartbeat_prompt_uses_file_reference
+            else {
+                return DaemonResponse::err(
+                    request.id,
+                    "missing heartbeat_prompt_uses_file_reference for method=heartbeat_sync_validate",
+                );
+            };
+            let Some(prompt_mentions_legacy_gas) = request.heartbeat_prompt_mentions_legacy_gas
+            else {
+                return DaemonResponse::err(
+                    request.id,
+                    "missing heartbeat_prompt_mentions_legacy_gas for method=heartbeat_sync_validate",
+                );
+            };
+
+            DaemonResponse::ok(
+                request.id,
+                build_heartbeat_sync_contract_result(
+                    canonical_available,
+                    mirror_available,
+                    mirror_matches,
+                    prompt_uses_file_reference,
+                    prompt_mentions_legacy_gas,
+                ),
+            )
+        }
+        "heartbeat_context_validate" => {
+            let Some(recent_turn_count) = request.heartbeat_context_recent_turn_count else {
+                return DaemonResponse::err(
+                    request.id,
+                    "missing heartbeat_context_recent_turn_count for method=heartbeat_context_validate",
+                );
+            };
+            let Some(recent_turn_limit) = request.heartbeat_context_recent_turn_limit else {
+                return DaemonResponse::err(
+                    request.id,
+                    "missing heartbeat_context_recent_turn_limit for method=heartbeat_context_validate",
+                );
+            };
+            let Some(reserved_candidate_present) =
+                request.heartbeat_context_reserved_candidate_present
+            else {
+                return DaemonResponse::err(
+                    request.id,
+                    "missing heartbeat_context_reserved_candidate_present for method=heartbeat_context_validate",
+                );
+            };
+            let Some(reserved_included) = request.heartbeat_context_reserved_included else {
+                return DaemonResponse::err(
+                    request.id,
+                    "missing heartbeat_context_reserved_included for method=heartbeat_context_validate",
+                );
+            };
+            let Some(content_heartbeat_candidate_present) =
+                request.heartbeat_context_content_heartbeat_candidate_present
+            else {
+                return DaemonResponse::err(
+                    request.id,
+                    "missing heartbeat_context_content_heartbeat_candidate_present for method=heartbeat_context_validate",
+                );
+            };
+            let Some(content_heartbeat_included) =
+                request.heartbeat_context_content_heartbeat_included
+            else {
+                return DaemonResponse::err(
+                    request.id,
+                    "missing heartbeat_context_content_heartbeat_included for method=heartbeat_context_validate",
+                );
+            };
+            let Some(noop_heartbeat_in_recent_turns) =
+                request.heartbeat_context_noop_heartbeat_in_recent_turns
+            else {
+                return DaemonResponse::err(
+                    request.id,
+                    "missing heartbeat_context_noop_heartbeat_in_recent_turns for method=heartbeat_context_validate",
+                );
+            };
+            let Some(heartbeat_trace_count) = request.heartbeat_context_trace_count else {
+                return DaemonResponse::err(
+                    request.id,
+                    "missing heartbeat_context_trace_count for method=heartbeat_context_validate",
+                );
+            };
+            let Some(heartbeat_trace_limit) = request.heartbeat_context_trace_limit else {
+                return DaemonResponse::err(
+                    request.id,
+                    "missing heartbeat_context_trace_limit for method=heartbeat_context_validate",
+                );
+            };
+            let Some(heartbeat_trace_oldest_first) =
+                request.heartbeat_context_trace_oldest_first
+            else {
+                return DaemonResponse::err(
+                    request.id,
+                    "missing heartbeat_context_trace_oldest_first for method=heartbeat_context_validate",
+                );
+            };
+            let Some(heartbeat_trace_only_heartbeat_entries) =
+                request.heartbeat_context_trace_only_heartbeat_entries
+            else {
+                return DaemonResponse::err(
+                    request.id,
+                    "missing heartbeat_context_trace_only_heartbeat_entries for method=heartbeat_context_validate",
+                );
+            };
+
+            DaemonResponse::ok(
+                request.id,
+                build_heartbeat_context_contract_result(
+                    recent_turn_count,
+                    recent_turn_limit,
+                    reserved_candidate_present,
+                    reserved_included,
+                    content_heartbeat_candidate_present,
+                    content_heartbeat_included,
+                    noop_heartbeat_in_recent_turns,
+                    heartbeat_trace_count,
+                    heartbeat_trace_limit,
+                    heartbeat_trace_oldest_first,
+                    heartbeat_trace_only_heartbeat_entries,
+                ),
+            )
+        }
         "memory_status" => {
             let (stats, missing_embeddings, missing_source_dates) = {
                 let memory = shared.memory.lock().await;
@@ -296,6 +470,7 @@ async fn dispatch_request(request: DaemonRequest, shared: &SharedState) -> Daemo
             let history_weekly = count_markdown_files(&shared.history_root.join("weekly"));
             let history_daily_merged =
                 count_markdown_files(&shared.history_root.join("daily-merged"));
+            let audit_daily = count_jsonl_files(&shared.history_root.join("audit"));
 
             DaemonResponse::ok(
                 request.id,
@@ -313,6 +488,10 @@ async fn dispatch_request(request: DaemonRequest, shared: &SharedState) -> Daemo
                         "daily_files": history_daily,
                         "weekly_files": history_weekly,
                         "daily_merged_files": history_daily_merged,
+                    },
+                    "audit": {
+                        "root": shared.history_root.join("audit").display().to_string(),
+                        "daily_files": audit_daily,
                     }
                 }),
             )
@@ -1159,7 +1338,7 @@ async fn dispatch_request(request: DaemonRequest, shared: &SharedState) -> Daemo
                             session_key: route.session_key.clone(),
                             timestamp: stimulus.timestamp as i64,
                             user_text: input.content.clone(),
-                            assistant_text: response_text,
+                            assistant_text: response_text.clone(),
                             tier: memory_tier,
                         };
 
@@ -1204,6 +1383,30 @@ async fn dispatch_request(request: DaemonRequest, shared: &SharedState) -> Daemo
                             append_and_compact_history(&shared.history_root, &turn_event)
                                 .map_err(|err| err.to_string())
                                 .ok();
+                        let driver_audit_entry = json!({
+                            "kind": "driver_turn",
+                            "ts": stimulus.timestamp as i64,
+                            "ts_iso": ts_to_utc(stimulus.timestamp as i64).to_rfc3339(),
+                            "session_key": route.session_key.clone(),
+                            "channel": route.channel.clone(),
+                            "context": route.context.clone(),
+                            "actor": input.actor.clone(),
+                            "user_text": input.content.clone(),
+                            "assistant_text": response_text,
+                            "tier": memory_tier,
+                            "tools_used": outcome.tools_used.clone(),
+                            "prompt_tokens": outcome.prompt_tokens,
+                            "completion_tokens": outcome.completion_tokens,
+                            "security_hold": outcome.security_hold.clone(),
+                            "model_resolution": outcome.model_resolution.clone(),
+                        });
+                        let driver_audit_write = append_driver_audit(
+                            &shared.history_root,
+                            stimulus.timestamp as i64,
+                            &driver_audit_entry,
+                        )
+                        .map_err(|err| err.to_string())
+                        .ok();
 
                         match serde_json::to_value(outcome) {
                             Ok(value) => {
@@ -1233,6 +1436,12 @@ async fn dispatch_request(request: DaemonRequest, shared: &SharedState) -> Daemo
                                     result["history"] = json!({
                                         "daily_file": history.daily_file,
                                         "rolled_up_files": history.rolled_up_files,
+                                    });
+                                }
+
+                                if let Some(audit) = driver_audit_write {
+                                    result["audit"] = json!({
+                                        "driver_daily_file": audit.daily_file,
                                     });
                                 }
 
@@ -1651,6 +1860,106 @@ fn build_startup_identity_contract_result(
     })
 }
 
+fn build_heartbeat_sync_contract_result(
+    canonical_available: bool,
+    mirror_available: bool,
+    mirror_matches: bool,
+    prompt_uses_file_reference: bool,
+    prompt_mentions_legacy_gas: bool,
+) -> Value {
+    let sources_available = vericore_policy::heartbeat_sync_policy::heartbeat_sources_available(
+        canonical_available,
+        mirror_available,
+    );
+    let mirror_consistent =
+        vericore_policy::heartbeat_sync_policy::heartbeat_mirror_consistent(mirror_matches);
+    let prompt_ok = vericore_policy::heartbeat_sync_policy::heartbeat_prompt_ok(
+        prompt_uses_file_reference,
+        prompt_mentions_legacy_gas,
+    );
+    let contract_ok = vericore_policy::heartbeat_sync_policy::heartbeat_contract_ok(
+        sources_available,
+        mirror_consistent,
+        prompt_ok,
+    );
+
+    json!({
+        "checked": true,
+        "contract_ok": contract_ok,
+        "canonical_available": canonical_available,
+        "mirror_available": mirror_available,
+        "mirror_matches": mirror_matches,
+        "prompt_uses_file_reference": prompt_uses_file_reference,
+        "prompt_mentions_legacy_gas": prompt_mentions_legacy_gas,
+    })
+}
+
+fn build_heartbeat_context_contract_result(
+    recent_turn_count: usize,
+    recent_turn_limit: usize,
+    reserved_candidate_present: bool,
+    reserved_included: bool,
+    content_heartbeat_candidate_present: bool,
+    content_heartbeat_included: bool,
+    noop_heartbeat_in_recent_turns: bool,
+    heartbeat_trace_count: usize,
+    heartbeat_trace_limit: usize,
+    heartbeat_trace_oldest_first: bool,
+    heartbeat_trace_only_heartbeat_entries: bool,
+) -> Value {
+    let recent_turns_ok = vericore_policy::heartbeat_context_policy::recent_turns_within_limit(
+        recent_turn_count,
+        recent_turn_limit,
+    );
+    let reserved_main_ok =
+        vericore_policy::heartbeat_context_policy::reserved_main_turn_preserved(
+            reserved_candidate_present,
+            reserved_included,
+        );
+    let content_heartbeat_ok =
+        vericore_policy::heartbeat_context_policy::content_heartbeat_preserved(
+            content_heartbeat_candidate_present,
+            content_heartbeat_included,
+        );
+    let noop_recent_turns_ok =
+        vericore_policy::heartbeat_context_policy::noop_heartbeat_excluded_from_recent_turns(
+            noop_heartbeat_in_recent_turns,
+        );
+    let heartbeat_trace_ok = vericore_policy::heartbeat_context_policy::heartbeat_trace_ok(
+        heartbeat_trace_count,
+        heartbeat_trace_limit,
+        heartbeat_trace_oldest_first,
+    );
+    let heartbeat_trace_separate =
+        vericore_policy::heartbeat_context_policy::heartbeat_trace_separate(
+            heartbeat_trace_only_heartbeat_entries,
+        );
+    let contract_ok = vericore_policy::heartbeat_context_policy::heartbeat_context_contract_ok(
+        recent_turns_ok,
+        reserved_main_ok,
+        content_heartbeat_ok,
+        noop_recent_turns_ok,
+        heartbeat_trace_ok,
+        heartbeat_trace_separate,
+    );
+
+    json!({
+        "checked": true,
+        "contract_ok": contract_ok,
+        "recent_turn_count": recent_turn_count,
+        "recent_turn_limit": recent_turn_limit,
+        "reserved_candidate_present": reserved_candidate_present,
+        "reserved_included": reserved_included,
+        "content_heartbeat_candidate_present": content_heartbeat_candidate_present,
+        "content_heartbeat_included": content_heartbeat_included,
+        "noop_heartbeat_in_recent_turns": noop_heartbeat_in_recent_turns,
+        "heartbeat_trace_count": heartbeat_trace_count,
+        "heartbeat_trace_limit": heartbeat_trace_limit,
+        "heartbeat_trace_oldest_first": heartbeat_trace_oldest_first,
+        "heartbeat_trace_only_heartbeat_entries": heartbeat_trace_only_heartbeat_entries,
+    })
+}
+
 fn trim_history(mut history: Vec<ChatMessage>, limit: usize) -> Vec<ChatMessage> {
     if limit == 0 {
         return Vec::new();
@@ -1733,6 +2042,11 @@ struct HistoryWriteResult {
     rolled_up_files: usize,
 }
 
+#[derive(Debug, Clone)]
+struct DriverAuditWriteResult {
+    daily_file: String,
+}
+
 fn resolve_history_root(config: &Config, config_path: &Path) -> PathBuf {
     if let Ok(raw) = std::env::var("VERICORE_HISTORY_DIR") {
         let trimmed = raw.trim();
@@ -1763,6 +2077,12 @@ fn ensure_history_dirs(root: &Path) -> Result<(), String> {
     fs::create_dir_all(root.join("daily-merged")).map_err(|e| {
         format!(
             "failed to create history daily-merged dir {}: {e}",
+            root.display()
+        )
+    })?;
+    fs::create_dir_all(root.join("audit")).map_err(|e| {
+        format!(
+            "failed to create history audit dir {}: {e}",
             root.display()
         )
     })?;
@@ -1810,6 +2130,33 @@ fn append_and_compact_history(
     Ok(HistoryWriteResult {
         daily_file: daily_path.display().to_string(),
         rolled_up_files,
+    })
+}
+
+fn append_driver_audit(
+    root: &Path,
+    timestamp: i64,
+    entry: &Value,
+) -> Result<DriverAuditWriteResult, String> {
+    ensure_history_dirs(root)?;
+
+    let day = ts_to_utc(timestamp).format("%Y-%m-%d").to_string();
+    let audit_path = root.join("audit").join(format!("{day}.jsonl"));
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&audit_path)
+        .map_err(|e| format!("open driver audit {}: {e}", audit_path.display()))?;
+
+    let mut encoded = serde_json::to_string(entry)
+        .map_err(|e| format!("encode driver audit {}: {e}", audit_path.display()))?;
+    encoded.push('\n');
+    file.write_all(encoded.as_bytes())
+        .map_err(|e| format!("append driver audit {}: {e}", audit_path.display()))?;
+
+    Ok(DriverAuditWriteResult {
+        daily_file: audit_path.display().to_string(),
     })
 }
 
@@ -1905,6 +2252,17 @@ fn count_markdown_files(dir: &Path) -> usize {
         .flatten()
         .filter_map(|entry| entry.file_name().to_str().map(str::to_string))
         .filter(|name| name.ends_with(".md"))
+        .count()
+}
+
+fn count_jsonl_files(dir: &Path) -> usize {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| entry.file_name().to_str().map(str::to_string))
+        .filter(|name| name.ends_with(".jsonl"))
         .count()
 }
 
@@ -2945,9 +3303,15 @@ fn day_to_ts(day: &str) -> Option<i64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_startup_identity_contract_result, trim_history};
+    use super::{
+        append_driver_audit, build_heartbeat_context_contract_result,
+        build_heartbeat_sync_contract_result, build_startup_identity_contract_result,
+        trim_history,
+    };
     use crate::llm::{ChatMessage, ToolCall};
     use serde_json::json;
+    use std::fs;
+    use std::path::PathBuf;
 
     #[test]
     fn startup_identity_contract_passes_when_agents_and_soul_are_present() {
@@ -2959,6 +3323,36 @@ mod tests {
     #[test]
     fn startup_identity_contract_fails_when_soul_is_not_injected() {
         let value = build_startup_identity_contract_result(true, true, true, false);
+        assert_eq!(value["contract_ok"], json!(false));
+    }
+
+    #[test]
+    fn heartbeat_sync_contract_passes_when_files_match_and_prompt_follows_file() {
+        let value = build_heartbeat_sync_contract_result(true, true, true, true, false);
+        assert_eq!(value["checked"], json!(true));
+        assert_eq!(value["contract_ok"], json!(true));
+    }
+
+    #[test]
+    fn heartbeat_sync_contract_fails_when_prompt_mentions_legacy_gas() {
+        let value = build_heartbeat_sync_contract_result(true, true, true, true, true);
+        assert_eq!(value["contract_ok"], json!(false));
+    }
+
+    #[test]
+    fn heartbeat_context_contract_passes_for_bounded_recent_turns_and_trace() {
+        let value = build_heartbeat_context_contract_result(
+            5, 5, true, true, true, true, false, 12, 32, true, true,
+        );
+        assert_eq!(value["checked"], json!(true));
+        assert_eq!(value["contract_ok"], json!(true));
+    }
+
+    #[test]
+    fn heartbeat_context_contract_fails_when_noop_heartbeat_enters_recent_turns() {
+        let value = build_heartbeat_context_contract_result(
+            5, 5, true, true, true, true, true, 12, 32, true, true,
+        );
         assert_eq!(value["contract_ok"], json!(false));
     }
 
@@ -2998,5 +3392,36 @@ mod tests {
         assert_eq!(trimmed[0].role, "assistant");
         assert_eq!(trimmed[1].role, "user");
         assert_eq!(trimmed[2].role, "assistant");
+    }
+
+    #[test]
+    fn append_driver_audit_writes_jsonl_entry() {
+        let root = unique_temp_dir("vericore-driver-audit-test");
+        fs::create_dir_all(&root).unwrap();
+
+        let entry = json!({
+            "kind": "driver_turn",
+            "session_key": "agent:main:main",
+            "user_text": "ping",
+            "assistant_text": "pong",
+        });
+        let result = append_driver_audit(&root, 1_741_686_400, &entry).unwrap();
+        let content = fs::read_to_string(&result.daily_file).unwrap();
+
+        assert!(content.contains("\"kind\":\"driver_turn\""));
+        assert!(content.contains("\"assistant_text\":\"pong\""));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "{prefix}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
     }
 }

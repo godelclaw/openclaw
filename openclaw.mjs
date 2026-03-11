@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 
+import fs from "node:fs";
 import module from "node:module";
+import path from "node:path";
 
 const MIN_NODE_MAJOR = 22;
 const MIN_NODE_MINOR = 12;
@@ -66,6 +68,41 @@ const installProcessWarningFilter = async () => {
 };
 
 await installProcessWarningFilter();
+
+const hasExplicitStateOrConfigOverride = (env) =>
+  Boolean(
+    env.OPENCLAW_STATE_DIR?.trim() ||
+      env.CLAWDBOT_STATE_DIR?.trim() ||
+      env.OPENCLAW_CONFIG_PATH?.trim() ||
+      env.CLAWDBOT_CONFIG_PATH?.trim() ||
+      env.OPENCLAW_HOME?.trim(),
+  );
+
+const detectRepoStateDirFromCwd = (cwd = process.cwd()) => {
+  let current = path.resolve(cwd);
+  while (true) {
+    const candidate = path.join(current, ".BGIseed-state", "openclaw.json");
+    try {
+      if (fs.existsSync(candidate)) {
+        return path.dirname(candidate);
+      }
+    } catch {
+      // Ignore inaccessible ancestors and keep walking upward.
+    }
+    const parent = path.dirname(current);
+    if (parent === current) {
+      return null;
+    }
+    current = parent;
+  }
+};
+
+if (!hasExplicitStateOrConfigOverride(process.env)) {
+  const detectedStateDir = detectRepoStateDirFromCwd();
+  if (detectedStateDir) {
+    process.env.OPENCLAW_STATE_DIR = detectedStateDir;
+  }
+}
 
 const tryImport = async (specifier) => {
   try {

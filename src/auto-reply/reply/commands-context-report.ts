@@ -1,10 +1,20 @@
+import path from "node:path";
+import { resolveAgentConfig, resolveDefaultAgentId } from "../../agents/agent-scope.js";
 import { analyzeBootstrapBudget } from "../../agents/bootstrap-budget.js";
 import {
   resolveBootstrapMaxChars,
   resolveBootstrapTotalMaxChars,
 } from "../../agents/pi-embedded-helpers.js";
 import { buildSystemPromptReport } from "../../agents/system-prompt-report.js";
+import { resolveStateDir } from "../../config/paths.js";
+import { resolveAgentMainSessionKey } from "../../config/sessions.js";
 import type { SessionSystemPromptReport } from "../../config/sessions/types.js";
+import {
+  DEFAULT_HEARTBEAT_RECENT_TURN_LIMIT,
+  DEFAULT_HEARTBEAT_TRACE_LIMIT,
+} from "../../infra/recent-turn-window.js";
+import { validateHeartbeatContextContract } from "../../vericore/heartbeat-context.js";
+import { validateHeartbeatSyncContract } from "../../vericore/heartbeat-sync.js";
 import { attachStartupIdentityContract } from "../../vericore/startup-identity.js";
 import type { ReplyPayload } from "../types.js";
 import { resolveCommandsSystemPromptBundle } from "./commands-system-prompt.js";
@@ -99,6 +109,27 @@ export async function buildContextReply(params: HandleCommandsParams): Promise<R
   }
 
   const report = await resolveContextReport(params);
+  const heartbeatSyncContract = await validateHeartbeatSyncContract({
+    cfg: params.cfg,
+    workspaceDir: params.workspaceDir,
+    options: { timeoutMs: 750, disableSpawnFallback: true },
+  });
+  const resolvedAgentId = params.agentId ?? resolveDefaultAgentId(params.cfg);
+  const agentHeartbeat = resolveAgentConfig(params.cfg, resolvedAgentId)?.heartbeat;
+  const heartbeatTraceLimit = Math.max(
+    0,
+    agentHeartbeat?.traceLimit ??
+      params.cfg.agents?.defaults?.heartbeat?.traceLimit ??
+      DEFAULT_HEARTBEAT_TRACE_LIMIT,
+  );
+  const heartbeatContextContract = await validateHeartbeatContextContract({
+    historyRoot: path.join(params.workspaceDir, "memory", "history"),
+    statePath: resolveStateDir(process.env),
+    mainSessionKey: resolveAgentMainSessionKey({ cfg: params.cfg, agentId: resolvedAgentId }),
+    recentTurnLimit: DEFAULT_HEARTBEAT_RECENT_TURN_LIMIT,
+    heartbeatTraceLimit,
+    options: { timeoutMs: 750, disableSpawnFallback: true },
+  });
   const session = {
     totalTokens: params.sessionEntry?.totalTokens ?? null,
     inputTokens: params.sessionEntry?.inputTokens ?? null,
@@ -107,7 +138,7 @@ export async function buildContextReply(params: HandleCommandsParams): Promise<R
   } as const;
 
   if (sub === "json") {
-    return { text: JSON.stringify({ report, session }, null, 2) };
+    return { text: JSON.stringify({ report, session, heartbeatSync: heartbeatSyncContract }, null, 2) };
   }
 
   if (sub !== "list" && sub !== "show" && sub !== "detail" && sub !== "deep") {
@@ -141,6 +172,22 @@ export async function buildContextReply(params: HandleCommandsParams): Promise<R
     ? startupIdentityContract.checked
       ? `Startup identity (VeriCore): ${startupIdentityContract.contract_ok ? "verified" : "FAILED"}`
       : `Startup identity (VeriCore): unavailable${startupIdentityContract.error ? ` (${startupIdentityContract.error})` : ""}`
+    : null;
+  const heartbeatSyncObservedLine = heartbeatSyncContract
+    ? `Heartbeat sync (observed): canonical=${heartbeatSyncContract.canonical_available} mirror=${heartbeatSyncContract.mirror_available} match=${heartbeatSyncContract.mirror_matches}; promptFile=${heartbeatSyncContract.prompt_uses_file_reference} legacyGas=${heartbeatSyncContract.prompt_mentions_legacy_gas}`
+    : null;
+  const heartbeatSyncContractLine = heartbeatSyncContract
+    ? heartbeatSyncContract.checked
+      ? `Heartbeat sync (VeriCore): ${heartbeatSyncContract.contract_ok ? "verified" : "FAILED"}`
+      : `Heartbeat sync (VeriCore): unavailable${heartbeatSyncContract.error ? ` (${heartbeatSyncContract.error})` : ""}`
+    : null;
+  const heartbeatContextObservedLine = heartbeatContextContract
+    ? `Heartbeat context (observed): recent=${heartbeatContextContract.recent_turn_count}/${heartbeatContextContract.recent_turn_limit}; reserved=${heartbeatContextContract.reserved_candidate_present}->${heartbeatContextContract.reserved_included}; contentHeartbeat=${heartbeatContextContract.content_heartbeat_candidate_present}->${heartbeatContextContract.content_heartbeat_included}; noopInRecent=${heartbeatContextContract.noop_heartbeat_in_recent_turns}; trace=${heartbeatContextContract.heartbeat_trace_count}/${heartbeatContextContract.heartbeat_trace_limit}; oldestFirst=${heartbeatContextContract.heartbeat_trace_oldest_first} traceOnly=${heartbeatContextContract.heartbeat_trace_only_heartbeat_entries}`
+    : null;
+  const heartbeatContextContractLine = heartbeatContextContract
+    ? heartbeatContextContract.checked
+      ? `Heartbeat context (VeriCore): ${heartbeatContextContract.contract_ok ? "verified" : "FAILED"}`
+      : `Heartbeat context (VeriCore): unavailable${heartbeatContextContract.error ? ` (${heartbeatContextContract.error})` : ""}`
     : null;
 
   const sandboxLine = `Sandbox: mode=${report.sandbox?.mode ?? "unknown"} sandboxed=${report.sandbox?.sandboxed ?? false}`;
@@ -222,6 +269,10 @@ export async function buildContextReply(params: HandleCommandsParams): Promise<R
     systemPromptLine,
     ...(startupIdentityObservedLine ? [startupIdentityObservedLine] : []),
     ...(startupIdentityContractLine ? [startupIdentityContractLine] : []),
+    ...(heartbeatSyncObservedLine ? [heartbeatSyncObservedLine] : []),
+    ...(heartbeatSyncContractLine ? [heartbeatSyncContractLine] : []),
+    ...(heartbeatContextObservedLine ? [heartbeatContextObservedLine] : []),
+    ...(heartbeatContextContractLine ? [heartbeatContextContractLine] : []),
     ...(bootstrapWarningLines.length ? ["", ...bootstrapWarningLines] : []),
     "",
     "Injected workspace files:",

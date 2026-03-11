@@ -15,7 +15,7 @@ import { listSkillCommandsForAgents } from "../auto-reply/skill-commands.js";
 import { buildCommandsMessagePaginated } from "../auto-reply/status.js";
 import { shouldDebounceTextInbound } from "../channels/inbound-debounce-policy.js";
 import { resolveChannelConfigWrites } from "../channels/plugins/config-writes.js";
-import { loadConfig } from "../config/config.js";
+import { loadConfig, resolveStateDir } from "../config/config.js";
 import { writeConfigFile } from "../config/io.js";
 import { loadSessionStore, resolveStorePath } from "../config/sessions.js";
 import type { DmPolicy } from "../config/types.base.js";
@@ -29,6 +29,11 @@ import {
   formatModelResolutionStatusLine,
   readLastModelResolution,
 } from "../infra/model-resolution-log.js";
+import {
+  readLastHeartbeatAudit,
+  resolveHeartbeatAuditPaths,
+  type HeartbeatAuditEntry,
+} from "../infra/heartbeat-audit-log.js";
 import { enqueueSystemEvent } from "../infra/system-events.js";
 import { MediaFetchError } from "../media/fetch.js";
 import { readChannelAllowFromStore } from "../pairing/pairing-store.js";
@@ -346,7 +351,10 @@ function formatMemorySetTierMessage(result: VeriCoreMemorySetTierResult): string
   ].join("\n");
 }
 
-function formatMemoryStatusMessage(status: VeriCoreMemoryStatus): string {
+function formatMemoryStatusMessage(
+  status: VeriCoreMemoryStatus,
+  heartbeatAudit?: HeartbeatAuditEntry,
+): string {
   const byTier = Object.entries(status.memory.by_tier)
     .map(([tier, count]) => `${tier}: ${count}`)
     .join(", ");
@@ -356,6 +364,10 @@ function formatMemoryStatusMessage(status: VeriCoreMemoryStatus): string {
 
   const missingEmbeddings = status.memory.missing_embeddings ?? 0;
   const missingSourceDates = status.memory.missing_source_dates ?? 0;
+  const heartbeatLogPath = resolveHeartbeatAuditPaths(resolveStateDir(process.env)).logPath;
+  const heartbeatStatus = heartbeatAudit
+    ? `${heartbeatAudit.status} @ ${new Date(heartbeatAudit.ts).toISOString()}`
+    : "(none)";
 
   return [
     "VeriCore memory status:",
@@ -367,6 +379,9 @@ function formatMemoryStatusMessage(status: VeriCoreMemoryStatus): string {
     `- memory file: ${status.memory.file}`,
     `- history root: ${status.history.root}`,
     `- history daily/week/merged: ${status.history.daily_files}/${status.history.weekly_files}/${status.history.daily_merged_files}`,
+    `- driver audit root/files: ${status.audit?.root ?? "(none)"}/${status.audit?.daily_files ?? 0}`,
+    `- heartbeat audit: ${heartbeatStatus}`,
+    `- heartbeat audit log: ${heartbeatLogPath}`,
   ].join("\n");
 }
 
@@ -1117,8 +1132,14 @@ export const registerTelegramHandlers = ({
 
       if (isMemoryStatusCommand(route.command)) {
         try {
-          const status = await runVeriCoreMemoryStatus();
-          await sendVeriCoreDriverResponse(params.msg, formatMemoryStatusMessage(status));
+          const [status, heartbeatAudit] = await Promise.all([
+            runVeriCoreMemoryStatus(),
+            readLastHeartbeatAudit(),
+          ]);
+          await sendVeriCoreDriverResponse(
+            params.msg,
+            formatMemoryStatusMessage(status, heartbeatAudit),
+          );
           return;
         } catch (err) {
           runtime.error?.(warn(`vericore memory_status error (falling back): ${String(err)}`));

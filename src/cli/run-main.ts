@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 import { loadDotEnv } from "../infra/dotenv.js";
@@ -62,6 +64,53 @@ export function shouldEnsureCliPath(argv: string[]): boolean {
   return true;
 }
 
+const REPO_STATE_DIRNAME = ".BGIseed-state";
+const CONFIG_FILENAME = "openclaw.json";
+
+function hasExplicitStateOrConfigOverride(env: NodeJS.ProcessEnv): boolean {
+  return Boolean(
+    env.OPENCLAW_STATE_DIR?.trim() ||
+      env.CLAWDBOT_STATE_DIR?.trim() ||
+      env.OPENCLAW_CONFIG_PATH?.trim() ||
+      env.CLAWDBOT_CONFIG_PATH?.trim() ||
+      env.OPENCLAW_HOME?.trim(),
+  );
+}
+
+export function detectRepoStateDirFromCwd(cwd: string = process.cwd()): string | null {
+  let current = path.resolve(cwd);
+  while (true) {
+    const candidate = path.join(current, REPO_STATE_DIRNAME, CONFIG_FILENAME);
+    try {
+      if (fs.existsSync(candidate)) {
+        return path.dirname(candidate);
+      }
+    } catch {
+      // Ignore inaccessible ancestors and continue walking upward.
+    }
+    const parent = path.dirname(current);
+    if (parent === current) {
+      return null;
+    }
+    current = parent;
+  }
+}
+
+export function applyRepoStateDirFallback(
+  env: NodeJS.ProcessEnv = process.env,
+  cwd: string = process.cwd(),
+): string | null {
+  if (hasExplicitStateOrConfigOverride(env)) {
+    return null;
+  }
+  const detected = detectRepoStateDirFromCwd(cwd);
+  if (!detected) {
+    return null;
+  }
+  env.OPENCLAW_STATE_DIR = detected;
+  return detected;
+}
+
 export async function runCli(argv: string[] = process.argv) {
   let normalizedArgv = normalizeWindowsArgv(argv);
   const parsedProfile = parseCliProfileArgs(normalizedArgv);
@@ -75,6 +124,7 @@ export async function runCli(argv: string[] = process.argv) {
 
   loadDotEnv({ quiet: true });
   normalizeEnv();
+  applyRepoStateDirFallback();
   if (shouldEnsureCliPath(normalizedArgv)) {
     ensureOpenClawCliOnPath();
   }

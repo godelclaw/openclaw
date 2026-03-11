@@ -19,6 +19,24 @@ export type HeartbeatSessionSeed = {
   lastTo: string;
 };
 
+async function removeDirWithRetries(dirPath: string, attempts: number = 4): Promise<void> {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      await fs.rm(dirPath, { recursive: true, force: true });
+      return;
+    } catch (error: unknown) {
+      if (!(error instanceof Error) || !("code" in error)) {
+        throw error;
+      }
+      const code = (error as { code?: string }).code;
+      if ((code !== "ENOTEMPTY" && code !== "EBUSY") || attempt === attempts - 1) {
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25 * (attempt + 1)));
+    }
+  }
+}
+
 export async function seedSessionStore(
   storePath: string,
   sessionKey: string,
@@ -77,7 +95,7 @@ export async function withTempHeartbeatSandbox<T>(
         process.env[envName] = previousValue;
       }
     }
-    await fs.rm(tmpDir, { recursive: true, force: true });
+    await removeDirWithRetries(tmpDir);
   }
 }
 
