@@ -69,6 +69,56 @@ describe("config io paths", () => {
     });
   });
 
+  it("applies a local config override from the state dir", async () => {
+    await withTempHome(async (home) => {
+      const configPath = await writeConfig(home, ".openclaw", 20012);
+      await fs.writeFile(
+        path.join(home, ".openclaw", "openclaw.local.json5"),
+        JSON.stringify(
+          {
+            gateway: { port: 20013 },
+            agents: {
+              defaults: {
+                model: {
+                  primary: "anthropic/claude-sonnet-4-6",
+                  fallbacks: ["openai-codex/gpt-5.4"],
+                },
+              },
+            },
+          },
+          null,
+          2,
+        ),
+        "utf-8",
+      );
+      const io = createIoForHome(home);
+      expect(io.configPath).toBe(configPath);
+      const cfg = io.loadConfig();
+      expect(cfg.gateway?.port).toBe(20013);
+      expect(cfg.agents?.defaults?.model).toEqual({
+        primary: "anthropic/claude-sonnet-4-6",
+        fallbacks: ["openai-codex/gpt-5.4"],
+      });
+    });
+  });
+
+  it("honors explicit OPENCLAW_LOCAL_CONFIG_PATH override", async () => {
+    await withTempHome(async (home) => {
+      const configPath = await writeConfig(home, ".openclaw", 20014);
+      const localOverridePath = path.join(home, "private-models.json5");
+      await fs.writeFile(
+        localOverridePath,
+        JSON.stringify({ gateway: { port: 20015 } }, null, 2),
+        "utf-8",
+      );
+      const io = createIoForHome(home, {
+        OPENCLAW_LOCAL_CONFIG_PATH: localOverridePath,
+      } as NodeJS.ProcessEnv);
+      expect(io.configPath).toBe(configPath);
+      expect(io.loadConfig().gateway?.port).toBe(20015);
+    });
+  });
+
   it("honors legacy CLAWDBOT_CONFIG_PATH override", async () => {
     await withTempHome(async (home) => {
       const customPath = await writeConfig(home, ".openclaw", 20003, "legacy-custom.json");

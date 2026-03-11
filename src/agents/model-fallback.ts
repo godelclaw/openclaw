@@ -297,8 +297,10 @@ function resolveFallbackCandidates(params: {
       params.cfg?.agents?.defaults?.model,
     );
     // When a session is already running on a configured fallback from another
-    // provider, bounce back to the configured primary first. This keeps the
-    // chain symmetric for "Anthropic -> Codex" and "Codex -> Anthropic".
+    // provider, continue through the configured fallback chain first and only
+    // return to the configured primary as the final fallback candidate. This
+    // preserves explicit fallback ordering (for example, Sonnet before Opus)
+    // instead of immediately jumping back to the default primary.
     if (normalizedPrimary.provider !== configuredPrimary.provider) {
       const matchedConfiguredFallback = configuredFallbacks.find((raw) => {
         const resolved = resolveModelRefFromString({
@@ -311,10 +313,7 @@ function resolveFallbackCandidates(params: {
       if (!matchedConfiguredFallback) {
         return [];
       }
-      return [
-        `${configuredPrimary.provider}/${configuredPrimary.model}`,
-        ...configuredFallbacks.filter((raw) => raw !== matchedConfiguredFallback),
-      ];
+      return configuredFallbacks.filter((raw) => raw !== matchedConfiguredFallback);
     }
     // Same provider: always use full fallback chain (model version differences within provider).
     return configuredFallbacks;

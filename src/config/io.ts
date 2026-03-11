@@ -6,7 +6,7 @@ import { isDeepStrictEqual } from "node:util";
 import JSON5 from "json5";
 import { ensureOwnerDisplaySecret } from "../agents/owner-display.js";
 import { loadDotEnv } from "../infra/dotenv.js";
-import { resolveRequiredHomeDir } from "../infra/home-dir.js";
+import { expandHomePrefix, resolveRequiredHomeDir } from "../infra/home-dir.js";
 import {
   loadShellEnvFallback,
   resolveShellEnvFallbackTimeoutMs,
@@ -81,6 +81,7 @@ const OPEN_DM_POLICY_ALLOW_FROM_RE =
   /^(?<policyPath>[a-z0-9_.-]+)\s*=\s*"open"\s+requires\s+(?<allowPath>[a-z0-9_.-]+)(?:\s+\(or\s+[a-z0-9_.-]+\))?\s+to include "\*"$/i;
 
 const CONFIG_AUDIT_LOG_FILENAME = "config-audit.jsonl";
+const LOCAL_CONFIG_OVERRIDE_FILENAME = "openclaw.local.json5";
 const loggedInvalidConfigs = new Set<string>();
 
 type ConfigWriteAuditResult = "rename" | "copy-fallback" | "failed";
@@ -665,6 +666,49 @@ function resolveConfigForRead(
   };
 }
 
+function resolveLocalConfigOverridePath(deps: Required<ConfigIoDeps>): string {
+  const explicit = deps.env.OPENCLAW_LOCAL_CONFIG_PATH?.trim();
+  if (explicit) {
+    const expanded = explicit.startsWith("~")
+      ? expandHomePrefix(explicit, {
+          home: resolveRequiredHomeDir(deps.env, deps.homedir),
+          env: deps.env,
+          homedir: deps.homedir,
+        })
+      : explicit;
+    return path.resolve(expanded);
+  }
+  return path.join(resolveStateDir(deps.env, deps.homedir), LOCAL_CONFIG_OVERRIDE_FILENAME);
+}
+
+function applyLocalConfigOverrideForRead(
+  baseConfig: unknown,
+  deps: Required<ConfigIoDeps>,
+): unknown {
+  const overridePath = resolveLocalConfigOverridePath(deps);
+  if (!deps.fs.existsSync(overridePath)) {
+    return baseConfig;
+  }
+
+  try {
+    const raw = deps.fs.readFileSync(overridePath, "utf-8");
+    const parsed = deps.json5.parse(raw);
+    const resolved = resolveConfigEnvVars(parsed, deps.env);
+    if (typeof resolved !== "object" || resolved === null || Array.isArray(resolved)) {
+      deps.logger.warn(
+        `Ignoring local config override at ${overridePath}: expected an object merge patch.`,
+      );
+      return baseConfig;
+    }
+    return applyMergePatch(baseConfig, resolved);
+  } catch (err) {
+    deps.logger.warn(
+      `Failed to apply local config override at ${overridePath}: ${String(err)}`,
+    );
+    return baseConfig;
+  }
+}
+
 type ReadConfigFileSnapshotInternalResult = {
   snapshot: ConfigFileSnapshot;
   envSnapshotForRestore?: Record<string, string | undefined>;
@@ -700,18 +744,19 @@ export function createConfigIO(overrides: ConfigIoDeps = {}) {
         resolveConfigIncludesForRead(parsed, configPath, deps),
         deps.env,
       );
-      warnOnConfigMiskeys(resolvedConfig, deps.logger);
-      if (typeof resolvedConfig !== "object" || resolvedConfig === null) {
+      const effectiveConfig = applyLocalConfigOverrideForRead(resolvedConfig, deps);
+      warnOnConfigMiskeys(effectiveConfig, deps.logger);
+      if (typeof effectiveConfig !== "object" || effectiveConfig === null) {
         return {};
       }
-      const preValidationDuplicates = findDuplicateAgentDirs(resolvedConfig as OpenClawConfig, {
+      const preValidationDuplicates = findDuplicateAgentDirs(effectiveConfig as OpenClawConfig, {
         env: deps.env,
         homedir: deps.homedir,
       });
       if (preValidationDuplicates.length > 0) {
         throw new DuplicateAgentDirError(preValidationDuplicates);
       }
-      const validated = validateConfigObjectWithPlugins(resolvedConfig);
+      const validated = validateConfigObjectWithPlugins(effectiveConfig);
       if (!validated.ok) {
         const details = validated.issues
           .map((iss) => `- ${iss.path || "<root>"}: ${iss.message}`)

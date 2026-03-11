@@ -306,7 +306,7 @@ describe("runWithModelFallback", () => {
     ]);
   });
 
-  it("returns to configured primary before continuing the chain when current model is a configured fallback", async () => {
+  it("continues through the remaining configured fallbacks before trying the primary", async () => {
     const cfg = makeCfg({
       agents: {
         defaults: {
@@ -321,9 +321,6 @@ describe("runWithModelFallback", () => {
     const run = vi.fn().mockImplementation(async (provider: string, model: string) => {
       if (provider === "anthropic" && model === "claude-haiku-3-5") {
         throw Object.assign(new Error("rate-limited"), { status: 429 });
-      }
-      if (provider === "openai" && model === "gpt-4.1-mini") {
-        throw Object.assign(new Error("primary still overloaded"), { status: 429 });
       }
       if (provider === "openrouter" && model === "openrouter/deepseek-chat") {
         return "ok";
@@ -343,11 +340,9 @@ describe("runWithModelFallback", () => {
     expect(result.model).toBe("openrouter/deepseek-chat");
     expect(run.mock.calls).toEqual([
       ["anthropic", "claude-haiku-3-5"],
-      ["openai", "gpt-4.1-mini"],
       ["openrouter", "openrouter/deepseek-chat"],
     ]);
   });
-
   it("treats normalized default refs as primary and keeps configured fallback chain", async () => {
     const cfg = makeCfg({
       agents: {
@@ -1032,7 +1027,7 @@ describe("runWithModelFallback", () => {
       expect(run).toHaveBeenNthCalledWith(2, "anthropic", "claude-opus-4-6"); // Config primary as final fallback
     });
 
-    it("prefers configured primary immediately when session is on a configured fallback", async () => {
+    it("continues through configured fallbacks before returning to configured primary", async () => {
       const cfg = makeCfg({
         agents: {
           defaults: {
@@ -1051,7 +1046,7 @@ describe("runWithModelFallback", () => {
       const run = vi
         .fn()
         .mockRejectedValueOnce(new Error("Rate limit exceeded"))
-        .mockResolvedValueOnce("back on primary");
+        .mockResolvedValueOnce("continued through fallback chain");
 
       const result = await runWithModelFallback({
         cfg,
@@ -1060,11 +1055,12 @@ describe("runWithModelFallback", () => {
         run,
       });
 
-      expect(result.result).toBe("back on primary");
+      expect(result.result).toBe("continued through fallback chain");
       expect(run).toHaveBeenCalledTimes(2);
       expect(run).toHaveBeenNthCalledWith(1, "openai-codex", "gpt-5.4");
-      expect(run).toHaveBeenNthCalledWith(2, "anthropic", "claude-opus-4-6");
+      expect(run).toHaveBeenNthCalledWith(2, "anthropic", "claude-sonnet-4-6");
     });
+
 
     it("uses fallbacks when session model exactly matches config primary", async () => {
       const cfg = makeCfg({
