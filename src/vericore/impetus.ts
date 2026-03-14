@@ -238,6 +238,40 @@ export type VeriCoreHeartbeatContextContractResult = VeriCoreHeartbeatContextObs
   error?: string | null;
 };
 
+export type VeriCoreEnergyObservedInput = {
+  noop_heartbeat_count: number;
+  acted_heartbeat_count: number;
+  conversation_burst_count: number;
+  conversation_gap_ms: number;
+  energy_value: number;
+};
+
+export type VeriCoreEnergyContractResult = VeriCoreEnergyObservedInput & {
+  checked: boolean;
+  contract_ok: boolean;
+  expected_energy: number | null;
+  gap_locked: boolean;
+  energy_matches: boolean;
+  error?: string | null;
+};
+
+export type VeriCoreAffectObservedInput = {
+  affect_gamma: number;
+  affect_prev: number[] | null;
+  affect_obs: number[];
+  affect_result: number[];
+};
+
+export type VeriCoreAffectContractResult = VeriCoreAffectObservedInput & {
+  checked: boolean;
+  contract_ok: boolean;
+  gamma_locked: boolean;
+  all_bounded: boolean;
+  fold_matches: boolean;
+  expected_result: number[] | null;
+  error?: string | null;
+};
+
 type VeriCoreSocketResponse<T> = {
   ok: boolean;
   id?: string;
@@ -394,7 +428,9 @@ async function runVeriCoreSocketMethod<T>(
     | "mindlock_reject"
     | "startup_identity_validate"
     | "heartbeat_sync_validate"
-    | "heartbeat_context_validate",
+    | "heartbeat_context_validate"
+    | "energy_validate"
+    | "affect_validate",
   stimulus: VeriCoreStimulusInput | undefined,
   query: string | undefined,
   embed: boolean | undefined,
@@ -998,6 +1034,55 @@ export async function runVeriCoreHeartbeatContextValidate(
       heartbeat_context_trace_oldest_first: observed.heartbeat_trace_oldest_first,
       heartbeat_context_trace_only_heartbeat_entries:
         observed.heartbeat_trace_only_heartbeat_entries,
+    },
+  );
+}
+
+export async function runVeriCoreEnergyValidate(
+  observed: VeriCoreEnergyObservedInput,
+  options: VeriCoreBridgeOptions = {},
+): Promise<VeriCoreEnergyContractResult> {
+  const validateOptions = {
+    ...options,
+    timeoutMs: options.timeoutMs ?? DEFAULT_DECIDE_TIMEOUT_MS,
+  };
+
+  return await runVeriCoreSocketMethod<VeriCoreEnergyContractResult>(
+    "energy_validate",
+    undefined,
+    undefined,
+    undefined,
+    validateOptions,
+    {
+      energy_noop_heartbeat_count: observed.noop_heartbeat_count,
+      energy_acted_heartbeat_count: observed.acted_heartbeat_count,
+      energy_conversation_burst_count: observed.conversation_burst_count,
+      energy_conversation_gap_ms: observed.conversation_gap_ms,
+      energy_value: observed.energy_value,
+    },
+  );
+}
+
+export async function runVeriCoreAffectValidate(
+  observed: VeriCoreAffectObservedInput,
+  options: VeriCoreBridgeOptions = {},
+): Promise<VeriCoreAffectContractResult> {
+  const validateOptions = {
+    ...options,
+    timeoutMs: options.timeoutMs ?? DEFAULT_DECIDE_TIMEOUT_MS,
+  };
+
+  return await runVeriCoreSocketMethod<VeriCoreAffectContractResult>(
+    "affect_validate",
+    undefined,
+    undefined,
+    undefined,
+    validateOptions,
+    {
+      affect_gamma: observed.affect_gamma,
+      affect_prev: observed.affect_prev,
+      affect_obs: observed.affect_obs,
+      affect_result: observed.affect_result,
     },
   );
 }

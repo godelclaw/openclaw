@@ -35,11 +35,14 @@
 //! - `startup_context_policy`: AGENTS/SOUL startup identity boundary contract
 //! - `heartbeat_sync_policy`: HEARTBEAT.md canonical/mirror coherence and prompt contract
 //! - `heartbeat_context_policy`: recent-turn window and heartbeat-trace continuity contract
+//! - `energy_policy`: deterministic energy fold and 30-minute conversation-gap contract
+//! - `affect_policy`: affect trace EWMA fold and gamma-lock boundary contract
 //!
 //! ## Cross-module composition proofs
 //!
 //! - `compositions`: end-to-end properties chaining multiple modules
 
+pub mod affect_policy;
 pub mod channels;
 pub mod compositions;
 pub mod egress;
@@ -47,6 +50,7 @@ pub mod gate_chain;
 pub mod heartbeat_context_policy;
 pub mod heartbeat_sync_policy;
 pub mod ingress;
+pub mod energy_policy;
 pub mod llm_bridge;
 pub mod mindlock;
 pub mod model_resolution;

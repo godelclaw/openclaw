@@ -84,7 +84,7 @@ function emitMemorySecretResolveDiagnostics(
 function formatSourceLabel(source: string, workspaceDir: string, agentId: string): string {
   if (source === "memory") {
     return shortenHomeInString(
-      `memory (MEMORY.md + ${path.join(workspaceDir, "memory")}${path.sep}*.md)`,
+      `memory (MIDTERMMEMORY.md + ${path.join(workspaceDir, "memory")}${path.sep}*.md)`,
     );
   }
   if (source === "sessions") {
@@ -188,17 +188,37 @@ async function scanMemoryFiles(
   extraPaths: string[] = [],
 ): Promise<SourceScan> {
   const issues: string[] = [];
-  const memoryFile = path.join(workspaceDir, "MEMORY.md");
-  const altMemoryFile = path.join(workspaceDir, "memory.md");
+  const memoryFile = path.join(workspaceDir, "MIDTERMMEMORY.md");
+  const altMemoryFile = path.join(workspaceDir, "midtermmemory.md");
+  const legacyMemoryFile = path.join(workspaceDir, "DAILYMEMORY.md");
+  const legacyAltMemoryFile = path.join(workspaceDir, "dailymemory.md");
+  const superLegacyMemoryFile = path.join(workspaceDir, "MEMORY.md");
+  const superLegacyAltMemoryFile = path.join(workspaceDir, "memory.md");
   const memoryDir = path.join(workspaceDir, "memory");
 
   const primary = await checkReadableFile(memoryFile);
   const alt = await checkReadableFile(altMemoryFile);
+  const legacy = await checkReadableFile(legacyMemoryFile);
+  const legacyAlt = await checkReadableFile(legacyAltMemoryFile);
+  const superLegacy = await checkReadableFile(superLegacyMemoryFile);
+  const superLegacyAlt = await checkReadableFile(superLegacyAltMemoryFile);
   if (primary.issue) {
     issues.push(primary.issue);
   }
   if (alt.issue) {
     issues.push(alt.issue);
+  }
+  if (legacy.issue) {
+    issues.push(legacy.issue);
+  }
+  if (legacyAlt.issue) {
+    issues.push(legacyAlt.issue);
+  }
+  if (superLegacy.issue) {
+    issues.push(superLegacy.issue);
+  }
+  if (superLegacyAlt.issue) {
+    issues.push(superLegacyAlt.issue);
   }
 
   const resolvedExtraPaths = normalizeExtraMemoryPaths(workspaceDir, extraPaths);

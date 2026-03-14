@@ -1,5 +1,13 @@
+import fs from "node:fs/promises";
+import path from "node:path";
 import type { Message, ReactionTypeEmoji } from "@grammyjs/types";
-import { resolveAgentDir, resolveDefaultAgentId } from "../agents/agent-scope.js";
+import {
+  resolveAgentConfig,
+  resolveAgentDir,
+  resolveAgentIdFromSessionKey,
+  resolveAgentWorkspaceDir,
+  resolveDefaultAgentId,
+} from "../agents/agent-scope.js";
 import { hasControlCommand } from "../auto-reply/command-detection.js";
 import {
   createInboundDebouncer,
@@ -11,12 +19,27 @@ import {
   formatModelsAvailableHeader,
 } from "../auto-reply/reply/commands-models.js";
 import { resolveStoredModelOverride } from "../auto-reply/reply/model-selection.js";
+import { resolveAgentMainSessionKey } from "../config/sessions/main-session.js";
+import {
+  DEFAULT_HEARTBEAT_RECENT_TURN_LIMIT,
+  DEFAULT_HEARTBEAT_TRACE_LIMIT,
+  DEFAULT_ENERGY_SCAN_LIMIT,
+  computeEnergy,
+  loadAffectAggregateBlock,
+  loadRecentHeartbeatTrace,
+  loadRecentTurnCandidates,
+  renderHeartbeatTraceBlock,
+  renderEnergyBlock,
+  renderRecentTurnsBlock,
+  selectRecentTurns,
+} from "../infra/recent-turn-window.js";
 import { listSkillCommandsForAgents } from "../auto-reply/skill-commands.js";
 import { buildCommandsMessagePaginated } from "../auto-reply/status.js";
 import { shouldDebounceTextInbound } from "../channels/inbound-debounce-policy.js";
 import { resolveChannelConfigWrites } from "../channels/plugins/config-writes.js";
-import { loadConfig, resolveStateDir } from "../config/config.js";
-import { writeConfigFile } from "../config/io.js";
+import JSON5 from "json5";
+import { loadConfig, resolveStateDir, type OpenClawConfig } from "../config/config.js";
+import { clearConfigCache, writeConfigFile } from "../config/io.js";
 import { loadSessionStore, resolveStorePath } from "../config/sessions.js";
 import type { DmPolicy } from "../config/types.base.js";
 import type {
@@ -80,6 +103,8 @@ import { resolveMedia } from "./bot/delivery.js";
 import {
   buildTelegramGroupPeerId,
   buildTelegramParentPeer,
+  describeReplyTarget,
+  normalizeForwardedContext,
   resolveTelegramForumThreadId,
   resolveTelegramGroupAllowFromContext,
 } from "./bot/helpers.js";
@@ -197,6 +222,103 @@ function isMemoryPromoteCommand(command?: string | null): boolean {
     normalized === "memory_promote" ||
     normalized === "memorypromote"
   );
+}
+
+function isMemorySessionsCommand(command?: string | null): boolean {
+  if (!command) {
+    return false;
+  }
+  const normalized = command.trim().toLowerCase();
+  return (
+    normalized === "memory-sessions" ||
+    normalized === "memory_sessions" ||
+    normalized === "memorysessions"
+  );
+}
+
+function parseMemorySessionsAction(text?: string): string {
+  const body = (text ?? "").trim();
+  if (!body.startsWith("/")) {
+    return "status";
+  }
+  const firstSpace = body.search(/\s/);
+  if (firstSpace < 0) {
+    return "status";
+  }
+  const arg = body.slice(firstSpace + 1).trim().toLowerCase();
+  if (arg === "on" || arg === "enable") return "on";
+  if (arg === "off" || arg === "disable") return "off";
+  if (arg === "toggle") return "toggle";
+  return "status";
+}
+
+const LOCAL_CONFIG_OVERRIDE_FILENAME = "openclaw.local.json5";
+
+function resolveMemorySessionsState(cfg: OpenClawConfig = loadConfig()): {
+  enabled: boolean;
+  sources: string[];
+} {
+  const ms = (cfg as Record<string, unknown>).agents as Record<string, unknown> | undefined;
+  const defaults = ms?.defaults as Record<string, unknown> | undefined;
+  const memorySearch = defaults?.memorySearch as Record<string, unknown> | undefined;
+  const experimental = memorySearch?.experimental as Record<string, unknown> | undefined;
+  const sessionMemory = experimental?.sessionMemory === true;
+  const rawSources = Array.isArray(memorySearch?.sources) ? memorySearch.sources as string[] : ["memory"];
+  const sources = sessionMemory && !rawSources.includes("sessions")
+    ? [...rawSources, "sessions"]
+    : rawSources;
+  return { enabled: sessionMemory, sources };
+}
+
+async function setMemorySessionsEnabled(stateDir: string, enabled: boolean): Promise<void> {
+  const overridePath = path.join(stateDir, LOCAL_CONFIG_OVERRIDE_FILENAME);
+  let existing: Record<string, unknown> = {};
+  try {
+    const raw = await fs.readFile(overridePath, "utf-8");
+    existing = JSON5.parse(raw) as Record<string, unknown>;
+    if (typeof existing !== "object" || existing === null || Array.isArray(existing)) {
+      existing = {};
+    }
+  } catch {
+    existing = {};
+  }
+
+  if (!existing.agents || typeof existing.agents !== "object" || Array.isArray(existing.agents)) {
+    existing.agents = {};
+  }
+  const agents = existing.agents as Record<string, unknown>;
+  if (!agents.defaults || typeof agents.defaults !== "object" || Array.isArray(agents.defaults)) {
+    agents.defaults = {};
+  }
+  const defaults = agents.defaults as Record<string, unknown>;
+  const prevMemorySearch =
+    defaults.memorySearch && typeof defaults.memorySearch === "object" && !Array.isArray(defaults.memorySearch)
+      ? (defaults.memorySearch as Record<string, unknown>)
+      : {};
+  const prevExperimental =
+    prevMemorySearch.experimental &&
+    typeof prevMemorySearch.experimental === "object" &&
+    !Array.isArray(prevMemorySearch.experimental)
+      ? (prevMemorySearch.experimental as Record<string, unknown>)
+      : {};
+  defaults.memorySearch = {
+    ...prevMemorySearch,
+    experimental: {
+      ...prevExperimental,
+      sessionMemory: enabled,
+    },
+    sources: enabled ? ["memory", "sessions"] : ["memory"],
+  };
+
+  await fs.writeFile(overridePath, JSON5.stringify(existing, null, 2) + "\n", "utf-8");
+  clearConfigCache();
+}
+
+function formatMemorySessionsStatusMessage(enabled: boolean, sources: string[]): string {
+  return [
+    `Transcript/session memory: ${enabled ? "enabled" : "disabled"}`,
+    `Sources: ${sources.join(", ")}`,
+  ].join("\n");
 }
 
 function isMindlockCommand(command?: string | null): boolean {
@@ -570,17 +692,93 @@ function hasReplyTargetMedia(msg: Message): boolean {
   return Boolean(replyTarget && hasInboundMedia(replyTarget));
 }
 
-function extractVeriCoreContentFromMessage(msg: Message): string {
+export async function buildVeriCoreContinuityContextForSession(params: {
+  cfg: OpenClawConfig;
+  sessionKey: string;
+  statePath?: string;
+  recentTurnLimit?: number;
+  traceLimit?: number;
+}): Promise<string> {
+  const resolvedAgentId = resolveAgentIdFromSessionKey(params.sessionKey);
+  const workspaceDir = resolveAgentWorkspaceDir(params.cfg, resolvedAgentId);
+  const historyRoot = path.join(workspaceDir, "memory", "history");
+  const statePath = params.statePath ?? resolveStateDir(process.env);
+  const recentTurnLimit = Math.max(
+    1,
+    params.recentTurnLimit ?? DEFAULT_HEARTBEAT_RECENT_TURN_LIMIT,
+  );
+  const agentHeartbeat = resolveAgentConfig(params.cfg, resolvedAgentId)?.heartbeat;
+  const traceLimit = Math.max(
+    0,
+    params.traceLimit ??
+      agentHeartbeat?.traceLimit ??
+      params.cfg.agents?.defaults?.heartbeat?.traceLimit ??
+      DEFAULT_HEARTBEAT_TRACE_LIMIT,
+  );
+  const mainSessionKey = resolveAgentMainSessionKey({
+    cfg: params.cfg,
+    agentId: resolvedAgentId,
+  });
+  const recentTurnCandidates = await loadRecentTurnCandidates({
+    historyRoot,
+    statePath,
+    mainSessionKey,
+    limit: recentTurnLimit,
+    scanLimit: DEFAULT_ENERGY_SCAN_LIMIT,
+  });
+  const recentTurns = selectRecentTurns({
+    entries: recentTurnCandidates,
+    limit: recentTurnLimit,
+  });
+  const recentTurnsBlock = renderRecentTurnsBlock(recentTurns, recentTurnLimit);
+  const energy = computeEnergy({ entries: recentTurnCandidates });
+  const energyBlock = renderEnergyBlock(energy);
+  const affectAggregateBlock = await loadAffectAggregateBlock({
+    historyRoot,
+    statePath,
+  });
+  const heartbeatTrace =
+    traceLimit > 0 ? await loadRecentHeartbeatTrace({ statePath, scanLimit: traceLimit }) : [];
+  const heartbeatTraceBlock = renderHeartbeatTraceBlock(heartbeatTrace, traceLimit);
+  return [energyBlock, affectAggregateBlock, recentTurnsBlock, heartbeatTraceBlock]
+    .filter(Boolean)
+    .join("\n\n")
+    .trim();
+}
+
+export function extractVeriCoreContentFromMessage(msg: Message): string {
   const parts: string[] = [];
   const text = (msg.text ?? msg.caption ?? "").trim();
+  const forwardOrigin = normalizeForwardedContext(msg);
+  if (forwardOrigin) {
+    parts.push(
+      `[Forwarded from ${forwardOrigin.from}${
+        forwardOrigin.date ? ` at ${new Date(forwardOrigin.date * 1000).toISOString()}` : ""
+      }]`,
+    );
+  }
   if (text) {
     parts.push(text);
   }
 
-  const replyTarget = msg.reply_to_message;
-  const replyText = (replyTarget?.text ?? replyTarget?.caption ?? "").trim();
-  if (replyText) {
-    parts.push(`[Reply context]\n${replyText}`);
+  const replyTarget = describeReplyTarget(msg);
+  if (replyTarget) {
+    const replyForwardAnnotation = replyTarget.forwardedFrom
+      ? `[Forwarded from ${replyTarget.forwardedFrom.from}${
+          replyTarget.forwardedFrom.date
+            ? ` at ${new Date(replyTarget.forwardedFrom.date * 1000).toISOString()}`
+            : ""
+        }]
+`
+      : "";
+    const replyLabel = replyTarget.kind === "quote" ? "Quoting" : "Replying to";
+    const replyBody =
+      replyTarget.kind === "quote" ? `"${replyTarget.body}"` : replyTarget.body;
+    parts.push(
+      `[${replyLabel} ${replyTarget.sender}${replyTarget.id ? ` id:${replyTarget.id}` : ""}]
+${replyForwardAnnotation}${replyBody}
+[/${replyLabel}]`,
+    );
   }
 
   if (!text) {
@@ -865,14 +1063,19 @@ export const registerTelegramHandlers = ({
     return threadKeys?.sessionKey ?? baseSessionKey;
   };
 
-  const buildVeriCoreStimulusForMessage = (msg: Message) => ({
-    channel: resolveVeriCoreChannelForMessage(msg),
-    actor: msg.from?.id ? String(msg.from.id) : (msg.from?.username ?? "unknown"),
-    content: extractVeriCoreContentFromMessage(msg),
-    timestamp: typeof msg.date === "number" ? msg.date : Math.floor(Date.now() / 1000),
-    session_key: resolveVeriCoreSessionKeyForMessage(msg),
-    route_preference: resolveVeriCoreRoutePreference(),
-  });
+  const buildVeriCoreStimulusForMessage = async (msg: Message, baseContent?: string) => {
+    const sessionKey = resolveVeriCoreSessionKeyForMessage(msg);
+    const continuityContext = await buildVeriCoreContinuityContextForSession({ cfg, sessionKey });
+    const rawContent = baseContent ?? extractVeriCoreContentFromMessage(msg);
+    return {
+      channel: resolveVeriCoreChannelForMessage(msg),
+      actor: msg.from?.id ? String(msg.from.id) : (msg.from?.username ?? "unknown"),
+      content: [continuityContext, rawContent].filter(Boolean).join("\n\n").trim(),
+      timestamp: typeof msg.date === "number" ? msg.date : Math.floor(Date.now() / 1000),
+      session_key: sessionKey,
+      route_preference: resolveVeriCoreRoutePreference(),
+    };
+  };
 
   const sendVeriCoreDriverResponse = async (msg: Message, responseText: string): Promise<void> => {
     const messageThreadId = (msg as { message_thread_id?: number }).message_thread_id;
@@ -1018,11 +1221,17 @@ export const registerTelegramHandlers = ({
       return;
     }
 
-    const stimulusInput = buildVeriCoreStimulusForMessage(params.msg);
+    const rawContent = extractVeriCoreContentFromMessage(params.msg);
     const rawCommand = extractSlashCommand(params.msg.text ?? params.msg.caption ?? "");
 
     // If Telegram message content is effectively empty, fall back to OpenClaw's richer
     // inbound context pipeline instead of sending metadata-only stimuli to VeriCore.
+    if (!rawContent.trim()) {
+      await params.onFallback();
+      return;
+    }
+
+    const stimulusInput = await buildVeriCoreStimulusForMessage(params.msg, rawContent);
     if (!stimulusInput.content.trim()) {
       await params.onFallback();
       return;
@@ -1183,6 +1392,42 @@ export const registerTelegramHandlers = ({
           return;
         } catch (err) {
           const message = "memory-promote failed: " + String(err);
+          runtime.error?.(warn(message));
+          await sendVeriCoreDriverResponse(params.msg, message);
+          return;
+        }
+      }
+
+      if (isMemorySessionsCommand(route.command)) {
+        try {
+          const action = parseMemorySessionsAction(params.msg.text ?? params.msg.caption ?? "");
+          const stateDir = resolveStateDir(process.env);
+          if (action === "status") {
+            const state = resolveMemorySessionsState();
+            await sendVeriCoreDriverResponse(
+              params.msg,
+              formatMemorySessionsStatusMessage(state.enabled, state.sources),
+            );
+            return;
+          }
+          const currentState = resolveMemorySessionsState();
+          const desiredEnabled =
+            action === "toggle" ? !currentState.enabled : action === "on";
+          await setMemorySessionsEnabled(stateDir, desiredEnabled);
+          const nextState = resolveMemorySessionsState();
+          await sendVeriCoreDriverResponse(
+            params.msg,
+            (desiredEnabled ? "Enabled" : "Disabled") +
+              " transcript/session memory.\n" +
+              formatMemorySessionsStatusMessage(
+                nextState.enabled,
+                nextState.sources,
+              ) +
+              "\n\nTakes effect on next config reload (next message or heartbeat).",
+          );
+          return;
+        } catch (err) {
+          const message = "memory-sessions failed: " + String(err);
           runtime.error?.(warn(message));
           await sendVeriCoreDriverResponse(params.msg, message);
           return;

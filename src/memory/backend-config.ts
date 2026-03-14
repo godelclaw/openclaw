@@ -1,3 +1,4 @@
+import fsSync from "node:fs";
 import path from "node:path";
 import { resolveAgentWorkspaceDir } from "../agents/agent-scope.js";
 import { parseDurationMs } from "../cli/parse-duration.js";
@@ -281,9 +282,35 @@ function resolveDefaultCollections(
   if (!include) {
     return [];
   }
-  const entries: Array<{ path: string; pattern: string; base: string }> = [
+  const canonicalEntries: Array<{ path: string; pattern: string; base: string }> = [
+    { path: workspaceDir, pattern: "MIDTERMMEMORY.md", base: "memory-root" },
+    { path: workspaceDir, pattern: "midtermmemory.md", base: "memory-alt" },
+  ];
+  const legacyEntries: Array<{ path: string; pattern: string; base: string }> = [
+    { path: workspaceDir, pattern: "DAILYMEMORY.md", base: "memory-root" },
+    { path: workspaceDir, pattern: "dailymemory.md", base: "memory-alt" },
+  ];
+  const superLegacyEntries: Array<{ path: string; pattern: string; base: string }> = [
     { path: workspaceDir, pattern: "MEMORY.md", base: "memory-root" },
     { path: workspaceDir, pattern: "memory.md", base: "memory-alt" },
+  ];
+  const canonicalPresent = canonicalEntries.some((entry) =>
+    fsSync.existsSync(path.join(entry.path, entry.pattern)),
+  );
+  const legacyPresent = legacyEntries.some((entry) =>
+    fsSync.existsSync(path.join(entry.path, entry.pattern)),
+  );
+  const superLegacyPresent = superLegacyEntries.some((entry) =>
+    fsSync.existsSync(path.join(entry.path, entry.pattern)),
+  );
+  const entries: Array<{ path: string; pattern: string; base: string }> = [
+    ...(canonicalPresent
+      ? canonicalEntries
+      : legacyPresent
+        ? legacyEntries
+        : superLegacyPresent
+          ? superLegacyEntries
+          : canonicalEntries),
     { path: path.join(workspaceDir, "memory"), pattern: "**/*.md", base: "memory-dir" },
   ];
   return entries.map((entry) => ({

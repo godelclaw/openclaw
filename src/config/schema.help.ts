@@ -768,11 +768,11 @@ export const FIELD_HELP: Record<string, string> = {
   "agents.defaults.envelopeElapsed": 'Include elapsed time in message envelopes ("on" or "off").',
   "agents.defaults.models": "Configured model catalog (keys are full provider/model IDs).",
   "agents.defaults.memorySearch":
-    "Vector search over MEMORY.md and memory/*.md (per-agent overrides supported).",
+    "Vector search over MIDTERMMEMORY.md and memory/*.md (per-agent overrides supported).",
   "agents.defaults.memorySearch.enabled":
     "Master toggle for memory search indexing and retrieval behavior on this agent profile. Keep enabled for semantic recall, and disable when you want fully stateless responses.",
   "agents.defaults.memorySearch.sources":
-    'Chooses which sources are indexed: "memory" reads MEMORY.md + memory files, and "sessions" includes transcript history. Keep ["memory"] unless you need recall from prior chat transcripts.',
+    'Chooses which sources are indexed: "memory" reads MIDTERMMEMORY.md + memory files, and "sessions" includes transcript history. Keep ["memory"] unless you need recall from prior chat transcripts.',
   "agents.defaults.memorySearch.extraPaths":
     "Adds extra directories or .md files to the memory index beyond default memory files. Use this when key reference docs live elsewhere in your repo; keep paths small and intentional to avoid noisy recall.",
   "agents.defaults.memorySearch.experimental.sessionMemory":
@@ -851,7 +851,7 @@ export const FIELD_HELP: Record<string, string> = {
   "memory.qmd.searchMode":
     'Selects the QMD retrieval path: "query" uses standard query flow, "search" uses search-oriented retrieval, and "vsearch" emphasizes vector retrieval. Keep default unless tuning relevance quality.',
   "memory.qmd.includeDefaultMemory":
-    "Automatically indexes default memory files (MEMORY.md and memory/**/*.md) into QMD collections. Keep enabled unless you want indexing controlled only through explicit custom paths.",
+    "Automatically indexes default memory files (MIDTERMMEMORY.md and memory/**/*.md) into QMD collections. Keep enabled unless you want indexing controlled only through explicit custom paths.",
   "memory.qmd.paths":
     "Adds custom directories or files to include in QMD indexing, each with an optional name and glob pattern. Use this for project-specific knowledge locations that are outside default memory paths.",
   "memory.qmd.paths.path":

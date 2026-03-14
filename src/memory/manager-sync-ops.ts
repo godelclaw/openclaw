@@ -365,6 +365,10 @@ export abstract class MemoryManagerSyncOps {
       return;
     }
     const watchPaths = new Set<string>([
+      path.join(this.workspaceDir, "MIDTERMMEMORY.md"),
+      path.join(this.workspaceDir, "midtermmemory.md"),
+      path.join(this.workspaceDir, "DAILYMEMORY.md"),
+      path.join(this.workspaceDir, "dailymemory.md"),
       path.join(this.workspaceDir, "MEMORY.md"),
       path.join(this.workspaceDir, "memory.md"),
       path.join(this.workspaceDir, "memory", "**", "*.md"),

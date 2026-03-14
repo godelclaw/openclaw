@@ -243,6 +243,22 @@ function buildChatCommands(): ChatCommandDefinition[] {
       category: "management",
     }),
     defineChatCommand({
+      key: "memory-sessions",
+      nativeName: "memory_sessions",
+      description: "Toggle transcript/session memory (status|on|off|toggle).",
+      textAliases: ["/memory-sessions", "/memory_sessions"],
+      acceptsArgs: true,
+      args: [
+        {
+          name: "action",
+          description: "status|on|off|toggle",
+          type: "string",
+          required: false,
+        },
+      ],
+      category: "status",
+    }),
+    defineChatCommand({
       key: "allowlist",
       description: "List/add/remove allowlist entries.",
       textAlias: "/allowlist",

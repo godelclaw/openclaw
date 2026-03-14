@@ -70,7 +70,7 @@ function parseMemoryDateFromPath(filePath: string): Date | null {
 
 function isEvergreenMemoryPath(filePath: string): boolean {
   const normalized = filePath.replaceAll("\\", "/").replace(/^\.\//, "");
-  if (normalized === "MEMORY.md" || normalized === "memory.md") {
+  if (["MIDTERMMEMORY.md", "midtermmemory.md", "DAILYMEMORY.md", "dailymemory.md", "MEMORY.md", "memory.md"].includes(normalized)) {
     return true;
   }
   if (!normalized.startsWith("memory/")) {

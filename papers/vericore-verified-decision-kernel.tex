@@ -33,7 +33,7 @@
 
 \title{VeriCore: A Verified Decision Kernel for Context-Integrity and Mindlock Boundary Control}
 \author{GodelClaw / VeriCore Notes}
-\date{March 10, 2026}
+\date{March 12, 2026}
 
 \begin{document}
 \maketitle
@@ -195,7 +195,7 @@ The bridge implementation exposed several verification gaps worth documenting:
 \end{itemize}
 
 \section{What Is Verified Today}
-The crate \texttt{vericore-policy} currently verifies 187 functions with 0 errors across 16 modules. The honest split is now three-way: runtime-called kernel predicates, runtime-called boundary validators, and verified reference specs.
+The crate \texttt{vericore-policy} currently verifies 264 functions with 0 errors across 17 modules. The honest split is now three-way: runtime-called kernel predicates, runtime-called boundary validators, and verified reference specs.
 
 \subsection{Verified Runtime Kernel}
 The following modules are production-wired: the same functions that Verus checks are the ones \texttt{vericore-core} calls for live policy decisions.
@@ -206,7 +206,7 @@ The following modules are production-wired: the same functions that Verus checks
 \end{itemize}
 
 \subsection{Verified Runtime Boundary Validators}
-Four additional verified modules are now called directly by the runtime, but they validate facts reported by TypeScript rather than replacing TypeScript logic.
+Five additional verified modules are now called directly by the runtime, but they validate facts reported by TypeScript rather than replacing TypeScript logic.
 
 \paragraph{Session model policy} (\texttt{session\_model\_policy.rs}). Called from the Rust LLM bridge client after each completion response. Proves metadata completeness, fallback visibility, provider-change flag consistency, allowlist enforcement, and override consistency. This is a boundary contract: it checks whether the bridge response is coherent enough for Rust to trust. It does \emph{not} prove that the TS runtime selected the semantically correct model end to end.
 
@@ -215,6 +215,8 @@ Four additional verified modules are now called directly by the runtime, but the
 \paragraph{Heartbeat sync} (\texttt{heartbeat\_sync\_policy.rs}). Called through \texttt{heartbeat\_sync\_validate} and surfaced in the context report. Proves that canonical and mirrored \texttt{HEARTBEAT.md} copies are both present, the mirror matches the canonical file, and the configured heartbeat prompt defers to \texttt{HEARTBEAT.md} rather than stale duplicated wording. This remains a boundary validator over TS-observed facts rather than a proof of the full heartbeat runner.
 
 \paragraph{Heartbeat continuity context} (\texttt{heartbeat\_context\_policy.rs}). Called through \texttt{heartbeat\_context\_validate} from the heartbeat runner and the context report. Proves that the recent-turn window stays bounded, a reservable recent main Telegram turn is preserved when present, content-bearing heartbeats remain visible in the main window, no-op heartbeats stay out of that main window, and the separate heartbeat trace stays bounded and oldest-first. This is a boundary validator over TS-selected continuity facts, not a proof of full prompt assembly.
+
+\paragraph{Affect trace fold} (\texttt{affect\_policy.rs}). Called through \texttt{affect\_validate} from the gestalt advancement path during heartbeat and Telegram prompt assembly. Validates the exponentially discounted moving-average fold used for the 7-dimension affect self-report system (connection, curiosity, contribution, integrity, joy, agency, safety). The contract checks three properties: the smoothing constant $\gamma$ is locked to 69 (representing 0.69), all dimension values stay in $[-100, 100]$ (integer-scaled), and the TS-computed fold step matches Rust's recomputation of $\mathrm{result} = \mathrm{clamp}(\mathrm{prev} \cdot \gamma / 100 + \mathrm{obs} \cdot (100 - \gamma) / 100)$. The integer scaling makes seam arithmetic exact and avoids float comparison issues. This is again a boundary validator: it does not prove that the LLM's self-reported affect values are meaningful, only that the aggregation pipeline is coherent.
 
 \subsection{Verified Reference Specs}
 Nine additional modules provide proved reference specs. These are not the authoritative runtime kernels; correspondence with runtime behavior is established by tests, runtime checks, and review.
@@ -258,6 +260,7 @@ The current proof boundary covers all deterministic policy decision surfaces:
 \item startup-identity boundary validation over AGENTS/SOUL availability and injection facts,
 \item heartbeat-sync boundary validation over canonical/mirror file coherence and file-following prompt facts,
 \item heartbeat continuity boundary validation over the recent-turn window and separate heartbeat trace,
+\item affect trace boundary validation over the EWMA fold, gamma lock, and dimension bounds,
 \item mindlock state machine (terminal states, valid transitions, source validation, cleanup eligibility),
 \item receipt and human-approval conditions for promotion (tamper detection, at-least-one-auth),
 \item egress flow control (transitivity, private-to-public denial, review triggers),
@@ -275,6 +278,7 @@ The following are explicitly \emph{outside} the proof boundary:
 \item reviewer prompt quality,
 \item RAG relevance,
 \item exact OpenClaw prompt assembly beyond the validated continuity-window facts,
+\item rolling mid-term memory rewrite quality and summarization fidelity,
 \item social or stylistic policy guidance.
 \end{itemize}
 
@@ -317,6 +321,7 @@ The correct near-term sequence is now:
 \item E2E test the security reviewer path through the completions bridge (still a known gap),
 \item harden the gateway-to-daemon authenticity boundary,
 \item strengthen TS$\leftrightarrow$Rust correspondence tests for model selection, tool broker behavior, and operator-surface routing,
+\item connect affect boundary validation to drive/action-tendency pipeline (affect traces are currently observational, not yet policy-gating),
 \item reduce remaining operator/runtime drift (for example, non-Telegram private parent surfaces and transport/reporting edge cases), and
 \item consolidate enum types and capability identifiers so production uses verified representations more directly.
 \end{enumerate}
@@ -330,7 +335,7 @@ Testing is still required. Verus does not replace integration tests for socket b
 \end{itemize}
 
 \section{Conclusion}
-VeriCore is now past the point where detached proof sketches alone are the main value. As of March 11, 2026, \texttt{vericore-policy} verifies 187 functions with 0 errors across 16 modules spanning a runtime-called kernel, runtime-called boundary validators, and verified reference specs.
+VeriCore is now past the point where detached proof sketches alone are the main value. As of March 11, 2026, \texttt{vericore-policy} verifies 264 functions with 0 errors across 17 modules spanning a runtime-called kernel, runtime-called boundary validators, and verified reference specs.
 
 For the runtime kernel (tiers, channels, ingress), the verified predicates are authoritative runtime logic. For the boundary validators (session-model metadata, startup identity, heartbeat sync, and heartbeat continuity), the verified predicates are authoritative checks on TS-reported facts at the Rust seam. For the reference specs (model resolution, mindlock, receipt, egress, gate chain, bridge contracts, tool broker, tool policy, and compositions), the invariants are stated precisely and proved consistent, serving as regression guards and precise targets for future runtime wiring.
 
@@ -339,7 +344,7 @@ The honest trust story is therefore layered rather than absolute. Formal verific
 \appendix
 
 \section{Core Agent Architecture}
-This appendix records the deployed operational shape as of March 11, 2026. It distinguishes the \emph{normal single-driver message path}, where VeriCore owns the turn loop, from the \emph{heartbeat path}, which is currently synthesized and run inside OpenClaw rather than entering through VeriCore first.
+This appendix records the deployed operational shape as of March 12, 2026. It distinguishes the \emph{normal single-driver message path}, where VeriCore owns the turn loop, from the \emph{heartbeat path}, which is currently synthesized and run inside OpenClaw rather than entering through VeriCore first.
 
 \subsection{A.1 Normal Interactive Turn}
 \begin{lstlisting}[style=code]
@@ -384,7 +389,7 @@ LLM provider(s)                MCP runtimes / tools
 Shared context visible to the LLM for a normal turn:
   1. OpenClaw system prompt
   2. injected workspace files (AGENTS.md, SOUL.md, TOOLS.md,
-     IDENTITY.md, USER.md, HEARTBEAT.md, MEMORY.md, etc., budgeted)
+     IDENTITY.md, USER.md, HEARTBEAT.md, MIDTERMMEMORY.md, etc., budgeted)
   3. session history / thread context / system events
   4. current inbound user message
 
@@ -428,7 +433,7 @@ Embedded agent run / system prompt assembly
 LLM sees:
   1. system prompt with tool list, runtime, heartbeat instructions
   2. Project Context with injected workspace files, including
-     AGENTS.md, SOUL.md, HEARTBEAT.md, and other bootstrap files
+     AGENTS.md, SOUL.md, HEARTBEAT.md, MIDTERMMEMORY.md, and other bootstrap files
   3. surviving session history for the chosen session key
   4. deterministic continuity context assembled by TS
      and boundary-validated by VeriCore:
@@ -437,6 +442,9 @@ LLM sees:
        - reserve one recent content-bearing heartbeat when available
        - separate heartbeat trace block (configurable traceLimit; default 32)
        - no-op heartbeats stay in the trace, not the main turn window
+     This continuity context is the current proto-STM. It is deterministic
+     and log-derived; it is not generated by an extra heartbeat-specific
+     LLM pass.
   5. the synthetic user heartbeat message:
        "Heartbeat. Read HEARTBEAT.md and follow it calmly.
         If there is no clear call to action,
@@ -459,7 +467,9 @@ Workspace bootstrap files (candidate set)
   USER.md
   HEARTBEAT.md
   BOOTSTRAP.md
-  MEMORY.md / memory.md
+  MIDTERMMEMORY.md / midtermmemory.md
+  DAILYMEMORY.md / dailymemory.md   (legacy fallback)
+  MEMORY.md / memory.md             (older fallback)
   extra configured bootstrap files
 
 Load path:
@@ -471,7 +481,45 @@ session compaction -> bounded AGENTS.md + SOUL.md reinjection
                    -> post-compaction context refresh event
 \end{lstlisting}
 
-\subsection{A.4 Trust Boundary Summary}
+\subsection{A.4 Mid-Term Memory Maintenance}
+\begin{lstlisting}[style=code]
+Canonical visible rolling summary
+  MIDTERMMEMORY.md
+
+Nightly maintenance path
+  vericore-memory-sleep.timer (23:00)
+      |
+      v
+  memory_refine
+      - private cortex dedup / source-date repair / embeddings
+      |
+      v
+  memory_extract_history
+      - derive bounded daily history files under memory/history/daily
+      |
+      v
+  memory_refresh_midterm
+      - read previous MIDTERMMEMORY.md
+      - iterate over new daily history chunks in date order
+      - for each chunk:
+          previous mid-term memory + chunk -> updated mid-term memory
+      - rewrite MIDTERMMEMORY.md with:
+          # MIDTERMMEMORY
+          Last refreshed: ...
+          Covered through: ...
+
+Role split:
+  heartbeat continuity context -> short-horizon proto-STM
+  MIDTERMMEMORY.md             -> rolling visible mid-term memory
+  private cortex + history     -> long-term / retrieval substrate
+
+Current proof status:
+  - no Verus runtime validator yet for MIDTERMMEMORY synthesis
+  - summarization quality remains outside the proof boundary
+  - raw audit/history remains canonical beneath the derived file
+\end{lstlisting}
+
+\subsection{A.5 Trust Boundary Summary}
 \begin{lstlisting}[style=code]
 Verus-checked and runtime-called:
   - channel/context/integrity kernel
@@ -486,6 +534,7 @@ Runtime-called but not fully proved end-to-end:
   - Telegram / web command routing
   - model override persistence
   - MCP lifecycle and transport health
+  - MIDTERMMEMORY rewrite quality
 
 Important current asymmetry:
   interactive parent / user turns -> VeriCore-first

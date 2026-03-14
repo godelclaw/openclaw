@@ -50,7 +50,7 @@ export function isMemoryPath(relPath: string): boolean {
   if (!normalized) {
     return false;
   }
-  if (normalized === "MEMORY.md" || normalized === "memory.md") {
+  if (["MIDTERMMEMORY.md", "midtermmemory.md", "DAILYMEMORY.md", "dailymemory.md", "MEMORY.md", "memory.md"].includes(normalized)) {
     return true;
   }
   return normalized.startsWith("memory/");
@@ -82,8 +82,12 @@ export async function listMemoryFiles(
   extraPaths?: string[],
 ): Promise<string[]> {
   const result: string[] = [];
-  const memoryFile = path.join(workspaceDir, "MEMORY.md");
-  const altMemoryFile = path.join(workspaceDir, "memory.md");
+  const memoryFile = path.join(workspaceDir, "MIDTERMMEMORY.md");
+  const altMemoryFile = path.join(workspaceDir, "midtermmemory.md");
+  const legacyMemoryFile = path.join(workspaceDir, "DAILYMEMORY.md");
+  const legacyAltMemoryFile = path.join(workspaceDir, "dailymemory.md");
+  const superLegacyMemoryFile = path.join(workspaceDir, "MEMORY.md");
+  const superLegacyAltMemoryFile = path.join(workspaceDir, "memory.md");
   const memoryDir = path.join(workspaceDir, "memory");
 
   const addMarkdownFile = async (absPath: string) => {
@@ -101,6 +105,10 @@ export async function listMemoryFiles(
 
   await addMarkdownFile(memoryFile);
   await addMarkdownFile(altMemoryFile);
+  await addMarkdownFile(legacyMemoryFile);
+  await addMarkdownFile(legacyAltMemoryFile);
+  await addMarkdownFile(superLegacyMemoryFile);
+  await addMarkdownFile(superLegacyAltMemoryFile);
   try {
     const dirStat = await fs.lstat(memoryDir);
     if (!dirStat.isSymbolicLink() && dirStat.isDirectory()) {

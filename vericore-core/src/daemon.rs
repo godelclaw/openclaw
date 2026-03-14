@@ -38,6 +38,8 @@ const BOOTSTRAP_MAX_LINE_CHARS: usize = 320;
 const BOOTSTRAP_MAX_ITEMS_PER_FILE: usize = 200;
 const HISTORY_MAX_USER_CHARS: usize = 800;
 const HISTORY_MAX_ASSISTANT_CHARS: usize = 1200;
+const MIDTERM_CHUNK_MAX_CHARS: usize = 6000;
+const MIDTERM_MAX_TURNS_PER_CHUNK: usize = 8;
 const MINDLOCK_VIEW_PREVIEW_MAX_CHARS: usize = 2000;
 const MEMORY_EMBED_ON_INGEST_DEFAULT: bool = false;
 const MEMORY_EMBED_ON_STARTUP_BACKFILL_DEFAULT: bool = false;
@@ -112,6 +114,24 @@ pub struct DaemonRequest {
     pub heartbeat_context_trace_oldest_first: Option<bool>,
     #[serde(default)]
     pub heartbeat_context_trace_only_heartbeat_entries: Option<bool>,
+    #[serde(default)]
+    pub energy_noop_heartbeat_count: Option<usize>,
+    #[serde(default)]
+    pub energy_acted_heartbeat_count: Option<usize>,
+    #[serde(default)]
+    pub energy_conversation_burst_count: Option<usize>,
+    #[serde(default)]
+    pub energy_conversation_gap_ms: Option<usize>,
+    #[serde(default)]
+    pub energy_value: Option<i64>,
+    #[serde(default)]
+    pub affect_gamma: Option<usize>,
+    #[serde(default)]
+    pub affect_prev: Option<Vec<i64>>,
+    #[serde(default)]
+    pub affect_obs: Option<Vec<i64>>,
+    #[serde(default)]
+    pub affect_result: Option<Vec<i64>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -456,6 +476,81 @@ async fn dispatch_request(request: DaemonRequest, shared: &SharedState) -> Daemo
                 ),
             )
         }
+        "energy_validate" => {
+            let Some(noop_heartbeat_count) = request.energy_noop_heartbeat_count else {
+                return DaemonResponse::err(
+                    request.id,
+                    "missing energy_noop_heartbeat_count for method=energy_validate",
+                );
+            };
+            let Some(acted_heartbeat_count) = request.energy_acted_heartbeat_count else {
+                return DaemonResponse::err(
+                    request.id,
+                    "missing energy_acted_heartbeat_count for method=energy_validate",
+                );
+            };
+            let Some(conversation_burst_count) = request.energy_conversation_burst_count else {
+                return DaemonResponse::err(
+                    request.id,
+                    "missing energy_conversation_burst_count for method=energy_validate",
+                );
+            };
+            let Some(conversation_gap_ms) = request.energy_conversation_gap_ms else {
+                return DaemonResponse::err(
+                    request.id,
+                    "missing energy_conversation_gap_ms for method=energy_validate",
+                );
+            };
+            let Some(energy_value) = request.energy_value else {
+                return DaemonResponse::err(
+                    request.id,
+                    "missing energy_value for method=energy_validate",
+                );
+            };
+
+            DaemonResponse::ok(
+                request.id,
+                build_energy_contract_result(
+                    noop_heartbeat_count,
+                    acted_heartbeat_count,
+                    conversation_burst_count,
+                    conversation_gap_ms,
+                    energy_value,
+                ),
+            )
+        }
+        "affect_validate" => {
+            let Some(gamma) = request.affect_gamma else {
+                return DaemonResponse::err(
+                    request.id,
+                    "missing affect_gamma for method=affect_validate",
+                );
+            };
+            let prev = request.affect_prev.as_deref();
+            let Some(ref obs) = request.affect_obs else {
+                return DaemonResponse::err(
+                    request.id,
+                    "missing affect_obs for method=affect_validate",
+                );
+            };
+            let Some(ref result) = request.affect_result else {
+                return DaemonResponse::err(
+                    request.id,
+                    "missing affect_result for method=affect_validate",
+                );
+            };
+            if prev.is_some_and(|values| values.len() != 7) || obs.len() != 7 || result.len() != 7 {
+                return DaemonResponse::err(
+                    request.id,
+                    "affect vectors must each have exactly 7 elements",
+                );
+            }
+
+            DaemonResponse::ok(
+                request.id,
+                build_affect_contract_result(gamma, prev, obs, result),
+            )
+        }
         "memory_status" => {
             let (stats, missing_embeddings, missing_source_dates) = {
                 let memory = shared.memory.lock().await;
@@ -558,6 +653,12 @@ async fn dispatch_request(request: DaemonRequest, shared: &SharedState) -> Daemo
                 Err(err) => {
                     DaemonResponse::err(request.id, format!("memory_extract_history failed: {err}"))
                 }
+            }
+        }
+        "memory_refresh_midterm" => {
+            match run_memory_refresh_midterm(shared).await {
+                Ok(result) => DaemonResponse::ok(request.id, result),
+                Err(err) => DaemonResponse::err(request.id, format!("memory_refresh_midterm failed: {err}")),
             }
         }
         "memory_set_tier" => {
@@ -1509,6 +1610,7 @@ fn env_u64(name: &str, default: u64) -> u64 {
 
 // ── Nightly history extraction ──────────────────────────────────────────────
 
+#[derive(Clone)]
 struct HistoryTurn {
     session_key: String,
     timestamp: i64,
@@ -1740,6 +1842,350 @@ async fn run_nightly_history_extract(
     Ok(new_ids.len())
 }
 
+
+fn canonical_midterm_memory_path(home_root: &Path) -> PathBuf {
+    home_root.join("MIDTERMMEMORY.md")
+}
+
+fn midterm_memory_path_candidates(home_root: &Path) -> Vec<PathBuf> {
+    vec![
+        canonical_midterm_memory_path(home_root),
+        home_root.join("midtermmemory.md"),
+        home_root.join("DAILYMEMORY.md"),
+        home_root.join("dailymemory.md"),
+        home_root.join("MEMORY.md"),
+        home_root.join("memory.md"),
+    ]
+}
+
+fn resolve_existing_midterm_memory_path(home_root: &Path) -> Option<PathBuf> {
+    midterm_memory_path_candidates(home_root)
+        .into_iter()
+        .find(|path| path.is_file())
+}
+
+fn parse_midterm_covered_through(content: &str) -> Option<NaiveDate> {
+    content.lines().find_map(|line| {
+        line.strip_prefix("Covered through: ")
+            .and_then(|raw| NaiveDate::parse_from_str(raw.trim(), "%Y-%m-%d").ok())
+    })
+}
+
+fn strip_midterm_wrapper(content: &str) -> String {
+    let trimmed = content.trim();
+    if !trimmed.starts_with("# MIDTERMMEMORY") {
+        return trimmed.to_string();
+    }
+
+    let mut lines = trimmed.lines();
+    let _ = lines.next();
+    let mut body_started = false;
+    let mut body_lines: Vec<&str> = Vec::new();
+    for line in lines {
+        if !body_started {
+            if line.starts_with("Last refreshed:")
+                || line.starts_with("Covered through:")
+                || line.trim().is_empty()
+            {
+                continue;
+            }
+            body_started = true;
+        }
+        body_lines.push(line);
+    }
+    body_lines.join("
+").trim().to_string()
+}
+
+fn render_midterm_document(body: &str, covered_through: Option<NaiveDate>) -> String {
+    let cleaned_body = body.trim();
+    let covered = covered_through
+        .map(|date| date.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let refreshed = Utc::now().to_rfc3339();
+    let body = if cleaned_body.is_empty() {
+        "## Active threads
+
+- No active mid-term memory yet.".to_string()
+    } else {
+        cleaned_body.to_string()
+    };
+    format!(
+        "# MIDTERMMEMORY
+Last refreshed: {refreshed}
+Covered through: {covered}
+
+{body}
+"
+    )
+}
+
+fn parse_history_date_from_path(path: &Path) -> Option<NaiveDate> {
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .and_then(|raw| NaiveDate::parse_from_str(raw.trim(), "%Y-%m-%d").ok())
+}
+
+fn history_turn_is_meaningful_for_midterm(turn: &HistoryTurn) -> bool {
+    if turn.session_key.starts_with("testbus:") {
+        return false;
+    }
+    let user = turn.user_text.trim();
+    let assistant = turn.assistant_text.trim();
+    if user.is_empty() && assistant.is_empty() {
+        return false;
+    }
+    if user.eq_ignore_ascii_case("testbus ping") && assistant.contains("Pong") {
+        return false;
+    }
+    user.chars().count() + assistant.chars().count() >= 40
+}
+
+fn render_midterm_history_chunk(date: NaiveDate, turns: &[HistoryTurn]) -> String {
+    let mut out = format!("# Daily history chunk {date}
+");
+    for turn in turns {
+        let rendered_ts = DateTime::from_timestamp(turn.timestamp, 0)
+            .map(|dt| dt.to_rfc3339())
+            .unwrap_or_else(|| date.to_string());
+        out.push_str(&format!(
+            "
+## {rendered_ts} | session={}
+- user: {}
+- assistant: {}
+",
+            turn.session_key,
+            truncate_chars(turn.user_text.trim(), HISTORY_MAX_USER_CHARS),
+            truncate_chars(turn.assistant_text.trim(), HISTORY_MAX_ASSISTANT_CHARS),
+        ));
+    }
+    out
+}
+
+fn split_midterm_history_chunks(date: NaiveDate, turns: &[HistoryTurn]) -> Vec<String> {
+    let mut chunks: Vec<String> = Vec::new();
+    let mut current: Vec<HistoryTurn> = Vec::new();
+    let mut current_chars = 0usize;
+
+    for turn in turns {
+        let estimate = turn.user_text.chars().count().min(HISTORY_MAX_USER_CHARS)
+            + turn.assistant_text.chars().count().min(HISTORY_MAX_ASSISTANT_CHARS)
+            + turn.session_key.chars().count()
+            + 96;
+        if !current.is_empty()
+            && (current_chars + estimate > MIDTERM_CHUNK_MAX_CHARS
+                || current.len() >= MIDTERM_MAX_TURNS_PER_CHUNK)
+        {
+            chunks.push(render_midterm_history_chunk(date, &current));
+            current.clear();
+            current_chars = 0;
+        }
+        current.push(turn.clone());
+        current_chars = current_chars.saturating_add(estimate);
+    }
+
+    if !current.is_empty() {
+        chunks.push(render_midterm_history_chunk(date, &current));
+    }
+
+    chunks
+}
+
+fn extract_midterm_markdown_body(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let unfenced = if trimmed.starts_with("```") && trimmed.ends_with("```") {
+        let mut lines = trimmed.lines();
+        let _ = lines.next();
+        let mut collected: Vec<&str> = lines.collect();
+        if matches!(collected.last(), Some(line) if line.trim() == "```") {
+            let _ = collected.pop();
+        }
+        collected.join("
+")
+    } else {
+        trimmed.to_string()
+    };
+    strip_midterm_wrapper(&unfenced)
+}
+
+async fn rewrite_midterm_memory_chunk(
+    client: &GatewayLlmClient,
+    system_msg: &ChatMessage,
+    current_body: &str,
+    chunk: &str,
+    date: NaiveDate,
+) -> Result<String, String> {
+    for attempt in 0..2 {
+        let attempt_suffix = if attempt == 0 {
+            "Keep section headings. Output only markdown body."
+        } else {
+            "Keep section headings. Output only markdown body. You must return non-empty markdown content. If the existing body is still mostly right, rewrite it with the new facts integrated instead of omitting content."
+        };
+        let prompt = format!(
+            "Current rolling mid-term memory body:
+
+{}
+
+New daily history chunk:
+
+{}
+
+Rewrite the rolling mid-term memory body so it incorporates the new chunk while staying concise and faithful. {}",
+            truncate_chars(current_body.trim(), 12_000),
+            chunk,
+            attempt_suffix,
+        );
+        let messages = vec![system_msg.clone(), ChatMessage::user(&prompt)];
+        let (result, _usage, _meta) = client
+            .chat(&messages, &[])
+            .await
+            .map_err(|err| format!("midterm refresh LLM call failed for {date}: {err}"))?;
+        let text = match result {
+            crate::llm::LlmTurnResult::FinalResponse { content } => content,
+            crate::llm::LlmTurnResult::ToolCalls { content, .. } => content.unwrap_or_default(),
+        };
+        let updated = extract_midterm_markdown_body(&text);
+        if !updated.trim().is_empty() {
+            return Ok(updated.trim().to_string());
+        }
+        let preview = truncate_chars(text.trim(), 400);
+        eprintln!(
+            "[vericore] midterm refresh empty output for {} attempt {} preview={} ",
+            date,
+            attempt + 1,
+            serde_json::to_string(&preview).unwrap_or_else(|_| "<preview-encode-failed>".to_string())
+        );
+    }
+    Err(format!("midterm refresh returned empty content for {date}"))
+}
+
+async fn run_memory_refresh_midterm(shared: &SharedState) -> Result<Value, String> {
+    let home_root = &shared.config.paths.home_root;
+    let target_path = canonical_midterm_memory_path(home_root);
+    let source_path = resolve_existing_midterm_memory_path(home_root);
+    let existing_text = match source_path.as_ref() {
+        Some(path) => fs::read_to_string(path)
+            .map_err(|err| format!("read {}: {err}", path.display()))?,
+        None => String::new(),
+    };
+    let mut current_body = if existing_text.trim().is_empty() {
+        String::new()
+    } else {
+        strip_midterm_wrapper(&existing_text)
+    };
+    let covered_through = parse_midterm_covered_through(&existing_text);
+
+    let daily_dir = shared.history_root.join("daily");
+    let mut history_files: Vec<(NaiveDate, PathBuf)> = Vec::new();
+    match fs::read_dir(&daily_dir) {
+        Ok(entries) => {
+            for entry in entries {
+                let entry = entry.map_err(|err| format!("read_dir {}: {err}", daily_dir.display()))?;
+                let path = entry.path();
+                if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
+                    continue;
+                }
+                let Some(date) = parse_history_date_from_path(&path) else {
+                    continue;
+                };
+                if let Some(covered) = covered_through
+                    && date <= covered
+                {
+                    continue;
+                }
+                history_files.push((date, path));
+            }
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
+            return Err(format!("read daily history dir {}: {err}", daily_dir.display()));
+        }
+    }
+    history_files.sort_by_key(|(date, _)| *date);
+
+    let system_msg = ChatMessage::system(
+        "You maintain Oruzi's rolling mid-term memory. Rewrite the memory body in concise markdown with stable section headings. Preserve durable active threads, open commitments, recent important developments, risks, and stable background. Integrate new facts from the history chunk. Remove duplicates, stale resolved trivia, and fluff. Do not invent facts. Output markdown body only. No title. No code fences.",
+    );
+    let mut llm: Option<GatewayLlmClient> = None;
+    let mut processed_dates: Vec<String> = Vec::new();
+    let mut llm_calls = 0usize;
+    let mut meaningful_chunks = 0usize;
+    let mut final_covered = covered_through;
+
+    for (date, path) in history_files {
+        let content = fs::read_to_string(&path)
+            .map_err(|err| format!("read history chunk {}: {err}", path.display()))?;
+        let turns: Vec<HistoryTurn> = parse_history_turns(&content)
+            .into_iter()
+            .filter(history_turn_is_meaningful_for_midterm)
+            .collect();
+        processed_dates.push(date.to_string());
+        final_covered = Some(date);
+        if turns.is_empty() {
+            continue;
+        }
+
+        let chunks = split_midterm_history_chunks(date, &turns);
+        if chunks.is_empty() {
+            continue;
+        }
+        if llm.is_none() {
+            llm = Some(
+                GatewayLlmClient::from_config(
+                    &shared.config.llm,
+                    CallKind::MemoryRefine,
+                    PromptMode::Driver,
+                    None,
+                )
+                .map_err(|err| err.to_string())?,
+            );
+        }
+        let client = llm.as_ref().expect("midterm llm client initialized");
+
+        for chunk in chunks {
+            current_body = rewrite_midterm_memory_chunk(client, &system_msg, &current_body, &chunk, date)
+                .await?;
+            llm_calls = llm_calls.saturating_add(1);
+            meaningful_chunks = meaningful_chunks.saturating_add(1);
+        }
+    }
+
+    if existing_text.trim().is_empty() && current_body.trim().is_empty() && final_covered.is_none() {
+        return Ok(json!({
+            "path": target_path.display().to_string(),
+            "changed": false,
+            "covered_through": Value::Null,
+            "processed_dates": processed_dates,
+            "llm_calls": llm_calls,
+            "meaningful_chunks": meaningful_chunks,
+        }));
+    }
+
+    let final_document = render_midterm_document(&current_body, final_covered);
+    let changed = existing_text.trim() != final_document.trim()
+        || source_path.as_ref() != Some(&target_path);
+    if changed {
+        if let Some(parent) = target_path.parent() {
+            fs::create_dir_all(parent).map_err(|err| {
+                format!("create midterm parent {}: {err}", parent.display())
+            })?;
+        }
+        fs::write(&target_path, final_document.as_bytes())
+            .map_err(|err| format!("write {}: {err}", target_path.display()))?;
+    }
+
+    Ok(json!({
+        "path": target_path.display().to_string(),
+        "source_path": source_path.as_ref().map(|path| path.display().to_string()),
+        "changed": changed,
+        "covered_through": final_covered.map(|date| date.to_string()),
+        "processed_dates": processed_dates,
+        "llm_calls": llm_calls,
+        "meaningful_chunks": meaningful_chunks,
+        "body_chars": current_body.chars().count(),
+    }))
+}
+
 async fn run_sleep_refine_loop(
     shared: Arc<SharedState>,
     interval: Duration,
@@ -1957,6 +2403,115 @@ fn build_heartbeat_context_contract_result(
         "heartbeat_trace_limit": heartbeat_trace_limit,
         "heartbeat_trace_oldest_first": heartbeat_trace_oldest_first,
         "heartbeat_trace_only_heartbeat_entries": heartbeat_trace_only_heartbeat_entries,
+    })
+}
+
+fn build_energy_contract_result(
+    noop_heartbeat_count: usize,
+    acted_heartbeat_count: usize,
+    conversation_burst_count: usize,
+    conversation_gap_ms: usize,
+    energy_value: i64,
+) -> Value {
+    let expected_energy = match (
+        i128::try_from(noop_heartbeat_count),
+        i128::try_from(acted_heartbeat_count),
+        i128::try_from(conversation_burst_count),
+    ) {
+        (Ok(noop), Ok(acted), Ok(conversation)) => {
+            i64::try_from(noop - acted - conversation).ok()
+        }
+        _ => None,
+    };
+    let gap_locked = vericore_policy::energy_policy::conversation_gap_locked(
+        conversation_gap_ms,
+    );
+    let energy_matches = expected_energy
+        .map(|expected| {
+            vericore_policy::energy_policy::energy_value_matches(
+                expected,
+                energy_value,
+            )
+        })
+        .unwrap_or(false);
+    let contract_ok = vericore_policy::energy_policy::energy_contract_ok(
+        gap_locked,
+        energy_matches,
+    );
+
+    json!({
+        "checked": true,
+        "contract_ok": contract_ok,
+        "noop_heartbeat_count": noop_heartbeat_count,
+        "acted_heartbeat_count": acted_heartbeat_count,
+        "conversation_burst_count": conversation_burst_count,
+        "conversation_gap_ms": conversation_gap_ms,
+        "energy_value": energy_value,
+        "expected_energy": expected_energy,
+        "gap_locked": gap_locked,
+        "energy_matches": energy_matches,
+    })
+}
+
+fn build_affect_contract_result(
+    gamma: usize,
+    prev: Option<&[i64]>,
+    obs: &[i64],
+    result: &[i64],
+) -> Value {
+    let gamma_locked = vericore_policy::affect_policy::affect_gamma_locked(gamma);
+
+    let mut all_bounded = true;
+    let mut fold_matches = true;
+    let mut expected: Vec<i64> = Vec::with_capacity(7);
+
+    for i in 0..7 {
+        let p = prev.map(|values| values[i]);
+        let o = obs[i];
+        let r = result[i];
+
+        if p.is_some_and(|value| !vericore_policy::affect_policy::affect_dimension_bounded(value))
+            || !vericore_policy::affect_policy::affect_dimension_bounded(o)
+            || !vericore_policy::affect_policy::affect_dimension_bounded(r)
+        {
+            all_bounded = false;
+        }
+
+        let o_clamped = o.max(-100).min(100);
+        let e = if let Some(p_value) = p {
+            let p_clamped = p_value.max(-100).min(100);
+            vericore_policy::affect_policy::affect_fold_step(
+                p_clamped,
+                o_clamped,
+                gamma as i64,
+            )
+        } else {
+            o_clamped
+        };
+        expected.push(e);
+
+        if !vericore_policy::affect_policy::affect_fold_matches(e, r) {
+            fold_matches = false;
+        }
+    }
+
+    let contract_ok = vericore_policy::affect_policy::affect_contract_ok(
+        gamma_locked,
+        all_bounded,
+        fold_matches,
+    );
+
+    json!({
+        "checked": true,
+        "contract_ok": contract_ok,
+        "gamma_locked": gamma_locked,
+        "all_bounded": all_bounded,
+        "fold_matches": fold_matches,
+        "affect_gamma": gamma,
+        "affect_prev": prev,
+        "affect_obs": obs,
+        "affect_result": result,
+        "expected_result": expected,
     })
 }
 
@@ -2989,7 +3544,25 @@ async fn bootstrap_memory_from_markdown(shared: &SharedState) -> Result<(), Stri
 
 fn bootstrap_markdown_files(home_root: &Path, history_root: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
-    files.push(home_root.join("MEMORY.md"));
+    let canonical_midterm = home_root.join("MIDTERMMEMORY.md");
+    let canonical_midterm_alt = home_root.join("midtermmemory.md");
+    let legacy_midterm = home_root.join("DAILYMEMORY.md");
+    let legacy_midterm_alt = home_root.join("dailymemory.md");
+    let super_legacy_midterm = home_root.join("MEMORY.md");
+    let super_legacy_midterm_alt = home_root.join("memory.md");
+    if canonical_midterm.is_file() {
+        files.push(canonical_midterm);
+    } else if canonical_midterm_alt.is_file() {
+        files.push(canonical_midterm_alt);
+    } else if legacy_midterm.is_file() {
+        files.push(legacy_midterm);
+    } else if legacy_midterm_alt.is_file() {
+        files.push(legacy_midterm_alt);
+    } else if super_legacy_midterm.is_file() {
+        files.push(super_legacy_midterm);
+    } else {
+        files.push(super_legacy_midterm_alt);
+    }
     push_markdown_files(&home_root.join("memory"), &mut files, false);
     // Private long-term notes that should remain private but be searchable in DM/family contexts.
     push_markdown_files(
@@ -3304,7 +3877,9 @@ fn day_to_ts(day: &str) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        append_driver_audit, build_heartbeat_context_contract_result,
+        append_driver_audit, build_affect_contract_result,
+        build_heartbeat_context_contract_result,
+        build_energy_contract_result,
         build_heartbeat_sync_contract_result, build_startup_identity_contract_result,
         trim_history,
     };
@@ -3354,6 +3929,66 @@ mod tests {
             5, 5, true, true, true, true, true, 12, 32, true, true,
         );
         assert_eq!(value["contract_ok"], json!(false));
+    }
+
+    #[test]
+    fn energy_contract_passes_for_matching_counts_and_gap() {
+        let value = build_energy_contract_result(3, 1, 3, 30 * 60 * 1000, -1);
+        assert_eq!(value["checked"], json!(true));
+        assert_eq!(value["contract_ok"], json!(true));
+        assert_eq!(value["expected_energy"], json!(-1));
+    }
+
+    #[test]
+    fn energy_contract_fails_for_wrong_gap_or_value() {
+        let wrong_gap = build_energy_contract_result(3, 1, 3, 15 * 60 * 1000, -1);
+        assert_eq!(wrong_gap["contract_ok"], json!(false));
+
+        let wrong_value = build_energy_contract_result(3, 1, 3, 30 * 60 * 1000, 0);
+        assert_eq!(wrong_value["contract_ok"], json!(false));
+    }
+
+    #[test]
+    fn affect_contract_passes_for_correct_fold() {
+        let prev = vec![50; 7];
+        let obs = vec![30; 7];
+        let result = vec![44; 7];
+        let value = build_affect_contract_result(69, Some(&prev), &obs, &result);
+        assert_eq!(value["checked"], json!(true));
+        assert_eq!(value["contract_ok"], json!(true));
+        assert_eq!(value["gamma_locked"], json!(true));
+    }
+
+    #[test]
+    fn affect_contract_fails_for_wrong_gamma() {
+        let prev = vec![50; 7];
+        let obs = vec![30; 7];
+        let result = vec![44; 7];
+        let value = build_affect_contract_result(70, Some(&prev), &obs, &result);
+        assert_eq!(value["contract_ok"], json!(false));
+        assert_eq!(value["gamma_locked"], json!(false));
+    }
+
+    #[test]
+    fn affect_contract_fails_for_wrong_fold() {
+        let prev = vec![50; 7];
+        let obs = vec![30; 7];
+        let mut result = vec![44; 7];
+        result[6] = 99;
+        let value = build_affect_contract_result(69, Some(&prev), &obs, &result);
+        assert_eq!(value["contract_ok"], json!(false));
+        assert_eq!(value["fold_matches"], json!(false));
+    }
+
+    #[test]
+    fn affect_contract_accepts_seed_step_without_previous_gestalt() {
+        let obs = vec![50; 7];
+        let result = vec![50; 7];
+        let value = build_affect_contract_result(69, None, &obs, &result);
+        assert_eq!(value["checked"], json!(true));
+        assert_eq!(value["contract_ok"], json!(true));
+        assert_eq!(value["affect_prev"], json!(null));
+        assert_eq!(value["expected_result"], json!(obs));
     }
 
     #[test]

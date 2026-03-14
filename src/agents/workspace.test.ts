@@ -9,6 +9,10 @@ import {
   DEFAULT_IDENTITY_FILENAME,
   DEFAULT_MEMORY_ALT_FILENAME,
   DEFAULT_MEMORY_FILENAME,
+  LEGACY_MEMORY_ALT_FILENAME,
+  LEGACY_MEMORY_FILENAME,
+  SUPERLEGACY_MEMORY_ALT_FILENAME,
+  SUPERLEGACY_MEMORY_FILENAME,
   DEFAULT_TOOLS_FILENAME,
   DEFAULT_USER_FILENAME,
   ensureAgentWorkspace,
@@ -68,7 +72,12 @@ function expectSubagentAllowedBootstrapNames(files: WorkspaceBootstrapFile[]) {
   expect(names).toContain("USER.md");
   expect(names).not.toContain("HEARTBEAT.md");
   expect(names).not.toContain("BOOTSTRAP.md");
-  expect(names).not.toContain("MEMORY.md");
+  expect(names).not.toContain(DEFAULT_MEMORY_FILENAME);
+  expect(names).not.toContain(DEFAULT_MEMORY_ALT_FILENAME);
+  expect(names).not.toContain(LEGACY_MEMORY_FILENAME);
+  expect(names).not.toContain(LEGACY_MEMORY_ALT_FILENAME);
+  expect(names).not.toContain(SUPERLEGACY_MEMORY_FILENAME);
+  expect(names).not.toContain(SUPERLEGACY_MEMORY_ALT_FILENAME);
 }
 
 describe("ensureAgentWorkspace", () => {
@@ -127,7 +136,7 @@ describe("ensureAgentWorkspace", () => {
     const tempDir = await makeTempWorkspace("openclaw-workspace-");
     await fs.mkdir(path.join(tempDir, "memory"), { recursive: true });
     await fs.writeFile(path.join(tempDir, "memory", "2026-02-25.md"), "# Daily log\nSome notes");
-    await fs.writeFile(path.join(tempDir, "MEMORY.md"), "# Long-term memory\nImportant stuff");
+    await fs.writeFile(path.join(tempDir, "DAILYMEMORY.md"), "# Mid-term memory\nImportant stuff");
 
     await ensureAgentWorkspace({ dir: tempDir, ensureBootstrapFiles: true });
 
@@ -137,8 +146,8 @@ describe("ensureAgentWorkspace", () => {
     });
     const state = await readOnboardingState(tempDir);
     expect(state.onboardingCompletedAt).toMatch(/\d{4}-\d{2}-\d{2}T/);
-    const memoryContent = await fs.readFile(path.join(tempDir, "MEMORY.md"), "utf-8");
-    expect(memoryContent).toBe("# Long-term memory\nImportant stuff");
+    const memoryContent = await fs.readFile(path.join(tempDir, "DAILYMEMORY.md"), "utf-8");
+    expect(memoryContent).toBe("# Mid-term memory\nImportant stuff");
   });
 
   it("treats git-backed workspaces as existing even when template files are missing", async () => {
@@ -155,7 +164,14 @@ describe("ensureAgentWorkspace", () => {
 describe("loadWorkspaceBootstrapFiles", () => {
   const getMemoryEntries = (files: Awaited<ReturnType<typeof loadWorkspaceBootstrapFiles>>) =>
     files.filter((file) =>
-      [DEFAULT_MEMORY_FILENAME, DEFAULT_MEMORY_ALT_FILENAME].includes(file.name),
+      [
+        DEFAULT_MEMORY_FILENAME,
+        DEFAULT_MEMORY_ALT_FILENAME,
+        LEGACY_MEMORY_FILENAME,
+        LEGACY_MEMORY_ALT_FILENAME,
+        SUPERLEGACY_MEMORY_FILENAME,
+        SUPERLEGACY_MEMORY_ALT_FILENAME,
+      ].includes(file.name),
     );
 
   const expectSingleMemoryEntry = (
@@ -168,20 +184,46 @@ describe("loadWorkspaceBootstrapFiles", () => {
     expect(memoryEntries[0]?.content).toBe(content);
   };
 
-  it("includes MEMORY.md when present", async () => {
+  it("includes legacy DAILYMEMORY.md when present", async () => {
     const tempDir = await makeTempWorkspace("openclaw-workspace-");
-    await writeWorkspaceFile({ dir: tempDir, name: "MEMORY.md", content: "memory" });
+    await writeWorkspaceFile({ dir: tempDir, name: LEGACY_MEMORY_FILENAME, content: "daily" });
+
+    const files = await loadWorkspaceBootstrapFiles(tempDir);
+    expectSingleMemoryEntry(files, "daily");
+  });
+
+  it("includes legacy dailymemory.md when newer files are absent", async () => {
+    const tempDir = await makeTempWorkspace("openclaw-workspace-");
+    await writeWorkspaceFile({ dir: tempDir, name: LEGACY_MEMORY_ALT_FILENAME, content: "daily-alt" });
+
+    const files = await loadWorkspaceBootstrapFiles(tempDir);
+    expectSingleMemoryEntry(files, "daily-alt");
+  });
+
+  it("falls back to MEMORY.md when newer names are absent", async () => {
+    const tempDir = await makeTempWorkspace("openclaw-workspace-");
+    await writeWorkspaceFile({ dir: tempDir, name: SUPERLEGACY_MEMORY_FILENAME, content: "memory" });
 
     const files = await loadWorkspaceBootstrapFiles(tempDir);
     expectSingleMemoryEntry(files, "memory");
   });
 
-  it("includes memory.md when MEMORY.md is absent", async () => {
+  it("prefers MIDTERMMEMORY.md over legacy files", async () => {
     const tempDir = await makeTempWorkspace("openclaw-workspace-");
-    await writeWorkspaceFile({ dir: tempDir, name: "memory.md", content: "alt" });
+    await writeWorkspaceFile({ dir: tempDir, name: DEFAULT_MEMORY_FILENAME, content: "midterm" });
+    await writeWorkspaceFile({ dir: tempDir, name: LEGACY_MEMORY_FILENAME, content: "daily" });
+    await writeWorkspaceFile({ dir: tempDir, name: SUPERLEGACY_MEMORY_FILENAME, content: "legacy" });
 
     const files = await loadWorkspaceBootstrapFiles(tempDir);
-    expectSingleMemoryEntry(files, "alt");
+    expectSingleMemoryEntry(files, "midterm");
+  });
+
+  it("includes midtermmemory.md when MIDTERMMEMORY.md is absent", async () => {
+    const tempDir = await makeTempWorkspace("openclaw-workspace-");
+    await writeWorkspaceFile({ dir: tempDir, name: DEFAULT_MEMORY_ALT_FILENAME, content: "midterm-alt" });
+
+    const files = await loadWorkspaceBootstrapFiles(tempDir);
+    expectSingleMemoryEntry(files, "midterm-alt");
   });
 
   it("omits memory entries when no memory files exist", async () => {
@@ -232,7 +274,7 @@ describe("filterBootstrapFilesForSession", () => {
     { name: "USER.md", path: "/w/USER.md", content: "", missing: false },
     { name: "HEARTBEAT.md", path: "/w/HEARTBEAT.md", content: "", missing: false },
     { name: "BOOTSTRAP.md", path: "/w/BOOTSTRAP.md", content: "", missing: false },
-    { name: "MEMORY.md", path: "/w/MEMORY.md", content: "", missing: false },
+    { name: DEFAULT_MEMORY_FILENAME, path: `/w/${DEFAULT_MEMORY_FILENAME}`, content: "", missing: false },
   ];
 
   it("returns all files for main session (no sessionKey)", () => {

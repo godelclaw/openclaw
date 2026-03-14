@@ -192,7 +192,7 @@ describe("Ghost reminder bug (issue #13317)", () => {
             kind: "driver_turn",
             session_key: "agent:main:main",
             user_text: "What happened with memory architecture?",
-            assistant_text: "We fixed the CLI footgun and should now add a recent-turn window.",
+            assistant_text: "We fixed the CLI footgun and should now add a recent-turn window.\n\n⋄⟨Cn:.5 C:.7 Ct:.8 I:.2 J:.6 A:.4 S:.6⟩",
           }) + "\n",
           "utf-8",
         );
@@ -224,6 +224,9 @@ describe("Ghost reminder bug (issue #13317)", () => {
           "We fixed the CLI footgun and should now add a recent-turn window.",
         );
         expect(calledCtx.Body).toContain("HEARTBEAT_OK");
+        expect(calledCtx.Body).toContain("Affect trace aggregate:");
+        expect(calledCtx.Body).toContain("⋄⟨");
+        expect(calledCtx.Body).toContain("Cn:.5");
         await new Promise((resolve) => setTimeout(resolve, 0));
       } finally {
         if (previousStateDir === undefined) {

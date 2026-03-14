@@ -69,14 +69,19 @@ import {
 import { peekSystemEventEntries } from "./system-events.js";
 import {
   DEFAULT_HEARTBEAT_RECENT_TURN_LIMIT,
+  DEFAULT_ENERGY_SCAN_LIMIT,
   appendHeartbeatTurnLog,
+  computeEnergy,
+  loadAffectAggregateBlock,
   loadRecentHeartbeatTrace,
   loadRecentTurnCandidates,
   renderHeartbeatTraceBlock,
+  renderEnergyBlock,
   renderRecentTurnsBlock,
   selectRecentTurns,
 } from "./recent-turn-window.js";
 import { validateHeartbeatContextContractFromData } from "../vericore/heartbeat-context.js";
+import { validateEnergyContractFromEntries } from "../vericore/energy.js";
 
 export type HeartbeatDeps = OutboundSendDeps &
   ChannelHeartbeatDeps & {
@@ -466,6 +471,8 @@ function stripLeadingHeartbeatResponsePrefix(
   return text.replace(prefixPattern, "");
 }
 
+const AFFECT_ONLY_RE = /^\s*\u22c4\u27e8[^\u27e9]+\u27e9\s*$/;
+
 function normalizeHeartbeatReply(
   payload: ReplyPayload,
   responsePrefix: string | undefined,
@@ -478,9 +485,31 @@ function normalizeHeartbeatReply(
     maxAckChars: ackMaxChars,
   });
   const hasMedia = Boolean(payload.mediaUrl || (payload.mediaUrls?.length ?? 0) > 0);
+  // Check for affect-trace-only on the normalized text (after prefix/token stripping)
+  const normalizedForAffectCheck = stripped.didStrip
+    ? stripped.text.trim()
+    : textForStrip.trim();
+  const isAffectOnly =
+    !hasMedia && AFFECT_ONLY_RE.test(normalizedForAffectCheck);
   if (stripped.shouldSkip && !hasMedia) {
+    // Pure HEARTBEAT_OK (possibly with affect trace stripped)
+    // Check if the raw text had an affect trace we should preserve
+    const affectMatch = rawText.match(/\u22c4\u27e8[^\u27e9]+\u27e9/);
     return {
       shouldSkip: true,
+      affectOnly: false,
+      affectText: affectMatch?.[0] ?? "",
+      text: "",
+      hasMedia,
+    };
+  }
+  if (isAffectOnly) {
+    // Affect-trace-only reply: no real content, but preserve the trace
+    const affectMatch = rawText.match(/\u22c4\u27e8[^\u27e9]+\u27e9/);
+    return {
+      shouldSkip: true,
+      affectOnly: true,
+      affectText: affectMatch?.[0] ?? normalizedForAffectCheck,
       text: "",
       hasMedia,
     };
@@ -489,7 +518,7 @@ function normalizeHeartbeatReply(
   if (responsePrefix && finalText && !finalText.startsWith(responsePrefix)) {
     finalText = `${responsePrefix} ${finalText}`;
   }
-  return { shouldSkip: false, text: finalText, hasMedia };
+  return { shouldSkip: false, affectOnly: false, affectText: "", text: finalText, hasMedia };
 }
 
 type HeartbeatReasonFlags = {
@@ -730,12 +759,42 @@ export async function runHeartbeatOnce(opts: {
     statePath,
     mainSessionKey,
     limit: HEARTBEAT_RECENT_TURN_LIMIT,
+    scanLimit: DEFAULT_ENERGY_SCAN_LIMIT,
   });
   const recentTurns = selectRecentTurns({
     entries: recentTurnCandidates,
     limit: HEARTBEAT_RECENT_TURN_LIMIT,
   });
   const recentTurnsBlock = renderRecentTurnsBlock(recentTurns, HEARTBEAT_RECENT_TURN_LIMIT);
+  const energy = computeEnergy({ entries: recentTurnCandidates });
+  const affectAggregateBlock = await loadAffectAggregateBlock({
+    historyRoot,
+    statePath,
+  });
+  const energyBlock = renderEnergyBlock(energy);
+  const energyContract = await validateEnergyContractFromEntries({
+    entries: recentTurnCandidates,
+  });
+  if (!energyContract.checked) {
+    log.warn("heartbeat: energy validator unavailable", {
+      agentId,
+      sessionKey,
+      error: energyContract.error ?? null,
+    });
+  } else if (!energyContract.contract_ok) {
+    log.warn("heartbeat: energy contract failed", {
+      agentId,
+      sessionKey,
+      noopHeartbeatCount: energyContract.noop_heartbeat_count,
+      actedHeartbeatCount: energyContract.acted_heartbeat_count,
+      conversationBurstCount: energyContract.conversation_burst_count,
+      conversationGapMs: energyContract.conversation_gap_ms,
+      energyValue: energyContract.energy_value,
+      expectedEnergy: energyContract.expected_energy,
+      gapLocked: energyContract.gap_locked,
+      energyMatches: energyContract.energy_matches,
+    });
+  }
   const heartbeatTraceLimit = resolveHeartbeatTraceLimit(cfg, heartbeat);
   const heartbeatTrace =
     heartbeatTraceLimit > 0
@@ -784,7 +843,9 @@ export async function runHeartbeatOnce(opts: {
   });
   const ctx = {
     Body: appendCronStyleCurrentTimeLine(
-      [prompt, recentTurnsBlock, heartbeatTraceBlock].filter(Boolean).join("\n\n"),
+      [prompt, energyBlock, affectAggregateBlock, recentTurnsBlock, heartbeatTraceBlock]
+        .filter(Boolean)
+        .join("\n\n"),
       cfg,
       startedAt,
     ),
@@ -929,7 +990,11 @@ export async function runHeartbeatOnce(opts: {
     }
     const shouldSkipMain = normalized.shouldSkip && !normalized.hasMedia && !hasExecCompletion;
     if (shouldSkipMain && reasoningPayloads.length === 0) {
-      await recordHeartbeatTurn(HEARTBEAT_TOKEN, "ok-token", opts.reason);
+      const okStatus = normalized.affectOnly ? "ok-affect" : "ok-token";
+      const okText = normalized.affectOnly && normalized.affectText
+        ? normalized.affectText
+        : HEARTBEAT_TOKEN;
+      await recordHeartbeatTurn(okText, okStatus, opts.reason);
       await restoreHeartbeatUpdatedAt({
         storePath,
         sessionKey,
@@ -940,13 +1005,13 @@ export async function runHeartbeatOnce(opts: {
       const okSent = await maybeSendHeartbeatOk();
       emitHeartbeatEvent({
         ...auditMeta,
-        status: "ok-token",
+        status: okStatus,
         reason: opts.reason,
         durationMs: Date.now() - startedAt,
         channel: delivery.channel !== "none" ? delivery.channel : undefined,
         accountId: delivery.accountId,
         silent: !okSent,
-        indicatorType: visibility.useIndicator ? resolveIndicatorType("ok-token") : undefined,
+        indicatorType: visibility.useIndicator ? resolveIndicatorType(okStatus) : undefined,
       });
       return { status: "ran", durationMs: Date.now() - startedAt };
     }

@@ -10,6 +10,7 @@ export function resolveIndicatorType(
   switch (status) {
     case "ok-empty":
     case "ok-token":
+    case "ok-affect":
       return "ok";
     case "sent":
       return "alert";

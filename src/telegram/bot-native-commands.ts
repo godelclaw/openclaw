@@ -160,7 +160,10 @@ function shouldDeferToTelegramMessageHandler(commandName: string): boolean {
     normalized === "memoryrefine" ||
     normalized === "memory-promote" ||
     normalized === "memory_promote" ||
-    normalized === "memorypromote"
+    normalized === "memorypromote" ||
+    normalized === "memory-sessions" ||
+    normalized === "memory_sessions" ||
+    normalized === "memorysessions"
   );
 }
 

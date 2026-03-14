@@ -29,8 +29,12 @@ export const DEFAULT_IDENTITY_FILENAME = "IDENTITY.md";
 export const DEFAULT_USER_FILENAME = "USER.md";
 export const DEFAULT_HEARTBEAT_FILENAME = "HEARTBEAT.md";
 export const DEFAULT_BOOTSTRAP_FILENAME = "BOOTSTRAP.md";
-export const DEFAULT_MEMORY_FILENAME = "MEMORY.md";
-export const DEFAULT_MEMORY_ALT_FILENAME = "memory.md";
+export const DEFAULT_MEMORY_FILENAME = "MIDTERMMEMORY.md";
+export const DEFAULT_MEMORY_ALT_FILENAME = "midtermmemory.md";
+export const LEGACY_MEMORY_FILENAME = "DAILYMEMORY.md";
+export const LEGACY_MEMORY_ALT_FILENAME = "dailymemory.md";
+export const SUPERLEGACY_MEMORY_FILENAME = "MEMORY.md";
+export const SUPERLEGACY_MEMORY_ALT_FILENAME = "memory.md";
 const WORKSPACE_STATE_DIRNAME = ".openclaw";
 const WORKSPACE_STATE_FILENAME = "workspace-state.json";
 const WORKSPACE_STATE_VERSION = 1;
@@ -138,7 +142,11 @@ export type WorkspaceBootstrapFileName =
   | typeof DEFAULT_HEARTBEAT_FILENAME
   | typeof DEFAULT_BOOTSTRAP_FILENAME
   | typeof DEFAULT_MEMORY_FILENAME
-  | typeof DEFAULT_MEMORY_ALT_FILENAME;
+  | typeof DEFAULT_MEMORY_ALT_FILENAME
+  | typeof LEGACY_MEMORY_FILENAME
+  | typeof LEGACY_MEMORY_ALT_FILENAME
+  | typeof SUPERLEGACY_MEMORY_FILENAME
+  | typeof SUPERLEGACY_MEMORY_ALT_FILENAME;
 
 export type WorkspaceBootstrapFile = {
   name: WorkspaceBootstrapFileName;
@@ -176,6 +184,10 @@ const VALID_BOOTSTRAP_NAMES: ReadonlySet<string> = new Set([
   DEFAULT_BOOTSTRAP_FILENAME,
   DEFAULT_MEMORY_FILENAME,
   DEFAULT_MEMORY_ALT_FILENAME,
+  LEGACY_MEMORY_FILENAME,
+  LEGACY_MEMORY_ALT_FILENAME,
+  SUPERLEGACY_MEMORY_FILENAME,
+  SUPERLEGACY_MEMORY_ALT_FILENAME,
 ]);
 
 async function writeFileIfMissing(filePath: string, content: string): Promise<boolean> {
@@ -353,6 +365,11 @@ export async function ensureAgentWorkspace(params?: {
     const userContentPaths = [
       path.join(dir, "memory"),
       path.join(dir, DEFAULT_MEMORY_FILENAME),
+      path.join(dir, DEFAULT_MEMORY_ALT_FILENAME),
+      path.join(dir, LEGACY_MEMORY_FILENAME),
+      path.join(dir, LEGACY_MEMORY_ALT_FILENAME),
+      path.join(dir, SUPERLEGACY_MEMORY_FILENAME),
+      path.join(dir, SUPERLEGACY_MEMORY_ALT_FILENAME),
       path.join(dir, ".git"),
     ];
     const paths = [...templatePaths, ...userContentPaths];
@@ -411,6 +428,11 @@ export async function ensureAgentWorkspace(params?: {
       const indicators = [
         path.join(dir, "memory"),
         path.join(dir, DEFAULT_MEMORY_FILENAME),
+        path.join(dir, DEFAULT_MEMORY_ALT_FILENAME),
+        path.join(dir, LEGACY_MEMORY_FILENAME),
+        path.join(dir, LEGACY_MEMORY_ALT_FILENAME),
+        path.join(dir, SUPERLEGACY_MEMORY_FILENAME),
+        path.join(dir, SUPERLEGACY_MEMORY_ALT_FILENAME),
         path.join(dir, ".git"),
       ];
       for (const indicator of indicators) {
@@ -464,35 +486,31 @@ async function resolveMemoryBootstrapEntries(
   const candidates: WorkspaceBootstrapFileName[] = [
     DEFAULT_MEMORY_FILENAME,
     DEFAULT_MEMORY_ALT_FILENAME,
+    LEGACY_MEMORY_FILENAME,
+    LEGACY_MEMORY_ALT_FILENAME,
+    SUPERLEGACY_MEMORY_FILENAME,
+    SUPERLEGACY_MEMORY_ALT_FILENAME,
   ];
-  const entries: Array<{ name: WorkspaceBootstrapFileName; filePath: string }> = [];
+  const seen = new Set<string>();
   for (const name of candidates) {
     const filePath = path.join(resolvedDir, name);
     try {
       await fs.access(filePath);
-      entries.push({ name, filePath });
+      let key = filePath;
+      try {
+        key = await fs.realpath(filePath);
+      } catch {
+        // keep original path key when realpath is unavailable
+      }
+      if (seen.has(key)) {
+        continue;
+      }
+      return [{ name, filePath }];
     } catch {
       // optional
     }
   }
-  if (entries.length <= 1) {
-    return entries;
-  }
-
-  const seen = new Set<string>();
-  const deduped: Array<{ name: WorkspaceBootstrapFileName; filePath: string }> = [];
-  for (const entry of entries) {
-    let key = entry.filePath;
-    try {
-      key = await fs.realpath(entry.filePath);
-    } catch {}
-    if (seen.has(key)) {
-      continue;
-    }
-    seen.add(key);
-    deduped.push(entry);
-  }
-  return deduped;
+  return [];
 }
 
 export async function loadWorkspaceBootstrapFiles(dir: string): Promise<WorkspaceBootstrapFile[]> {

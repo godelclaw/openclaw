@@ -5,7 +5,7 @@ import { resolveStateDir } from "../config/paths.js";
 
 export interface HeartbeatAuditEntry {
   ts: number;
-  status: "sent" | "ok-empty" | "ok-token" | "skipped" | "failed";
+  status: "sent" | "ok-empty" | "ok-token" | "ok-affect" | "skipped" | "failed";
   to?: string;
   accountId?: string;
   preview?: string;

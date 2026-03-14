@@ -13,7 +13,14 @@ export const MEMORY_SYSTEM_PROMPT = [
 ].join("\n");
 
 export async function shouldSuggestMemorySystem(workspaceDir: string): Promise<boolean> {
-  const memoryPaths = [path.join(workspaceDir, "MEMORY.md"), path.join(workspaceDir, "memory.md")];
+  const memoryPaths = [
+    path.join(workspaceDir, "MIDTERMMEMORY.md"),
+    path.join(workspaceDir, "midtermmemory.md"),
+    path.join(workspaceDir, "DAILYMEMORY.md"),
+    path.join(workspaceDir, "dailymemory.md"),
+    path.join(workspaceDir, "MEMORY.md"),
+    path.join(workspaceDir, "memory.md"),
+  ];
 
   for (const memoryPath of memoryPaths) {
     try {
@@ -27,7 +34,7 @@ export async function shouldSuggestMemorySystem(workspaceDir: string): Promise<b
   const agentsPath = path.join(workspaceDir, DEFAULT_AGENTS_FILENAME);
   try {
     const content = await fs.promises.readFile(agentsPath, "utf-8");
-    if (/memory\.md/i.test(content)) {
+    if (/(midtermmemory|dailymemory|memory)\.md/i.test(content)) {
       return false;
     }
   } catch {
