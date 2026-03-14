@@ -6,6 +6,20 @@ ROOT_DIR="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 RUN_NODE_TOOL="$ROOT_DIR/scripts/pre-commit/run-node-tool.sh"
 FILTER_FILES="$ROOT_DIR/scripts/pre-commit/filter-staged-files.mjs"
 
+if ! command -v node >/dev/null 2>&1; then
+  if [[ -s "${HOME:-}/.nvm/nvm.sh" ]]; then
+    # Git hooks often run without the interactive shell PATH that exposes Node.
+    # Pull in nvm when available so the hook can find node/npm/pnpm consistently.
+    # shellcheck disable=SC1090
+    . "${HOME}/.nvm/nvm.sh" >/dev/null 2>&1 || true
+  fi
+fi
+
+if ! command -v node >/dev/null 2>&1; then
+  echo "Missing node in PATH; install/activate Node (for example via ~/.nvm) before committing." >&2
+  exit 1
+fi
+
 if [[ ! -x "$RUN_NODE_TOOL" ]]; then
   echo "Missing helper: $RUN_NODE_TOOL" >&2
   exit 1
