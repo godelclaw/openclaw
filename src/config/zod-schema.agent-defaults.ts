@@ -1,25 +1,24 @@
 import { z } from "zod";
 import { isValidNonNegativeByteSizeString } from "./byte-size.js";
-import { AgentModelSchema } from "./zod-schema.agent-model.js";
 import {
   HeartbeatSchema,
-  McpServersSchema,
+  AgentSandboxSchema,
+  AgentModelSchema,
   MemorySearchSchema,
-  SandboxBrowserSchema,
-  SandboxDockerSchema,
-  SandboxPruneSchema,
 } from "./zod-schema.agent-runtime.js";
 import {
   BlockStreamingChunkSchema,
   BlockStreamingCoalesceSchema,
   CliBackendSchema,
   HumanDelaySchema,
+  TypingModeSchema,
 } from "./zod-schema.core.js";
 
 export const AgentDefaultsSchema = z
   .object({
     model: AgentModelSchema.optional(),
     imageModel: AgentModelSchema.optional(),
+    imageGenerationModel: AgentModelSchema.optional(),
     pdfModel: AgentModelSchema.optional(),
     pdfMaxBytesMb: z.number().positive().optional(),
     pdfMaxPages: z.number().int().positive().optional(),
@@ -52,7 +51,6 @@ export const AgentDefaultsSchema = z
     envelopeElapsed: z.union([z.literal("on"), z.literal("off")]).optional(),
     contextTokens: z.number().int().positive().optional(),
     cliBackends: z.record(z.string(), CliBackendSchema).optional(),
-    mcpServers: McpServersSchema,
     memorySearch: MemorySearchSchema,
     contextPruning: z
       .object({
@@ -90,12 +88,16 @@ export const AgentDefaultsSchema = z
     compaction: z
       .object({
         mode: z.union([z.literal("default"), z.literal("safeguard")]).optional(),
+        reserveTokens: z.number().int().nonnegative().optional(),
+        keepRecentTokens: z.number().int().positive().optional(),
         reserveTokensFloor: z.number().int().nonnegative().optional(),
         maxHistoryShare: z.number().min(0.1).max(0.9).optional(),
+        customInstructions: z.string().optional(),
         identifierPolicy: z
           .union([z.literal("strict"), z.literal("off"), z.literal("custom")])
           .optional(),
         identifierInstructions: z.string().optional(),
+        recentTurnsPreserve: z.number().int().min(0).max(12).optional(),
         qualityGuard: z
           .object({
             enabled: z.boolean().optional(),
@@ -103,6 +105,10 @@ export const AgentDefaultsSchema = z
           })
           .strict()
           .optional(),
+        postIndexSync: z.enum(["off", "async", "await"]).optional(),
+        postCompactionSections: z.array(z.string()).optional(),
+        model: z.string().optional(),
+        timeoutSeconds: z.number().int().positive().optional(),
         memoryFlush: z
           .object({
             enabled: z.boolean().optional(),
@@ -119,6 +125,14 @@ export const AgentDefaultsSchema = z
             systemPrompt: z.string().optional(),
           })
           .strict()
+          .optional(),
+      })
+      .strict()
+      .optional(),
+    embeddedPi: z
+      .object({
+        projectSettingsPolicy: z
+          .union([z.literal("trusted"), z.literal("sanitize"), z.literal("ignore")])
           .optional(),
       })
       .strict()
@@ -145,56 +159,41 @@ export const AgentDefaultsSchema = z
     humanDelay: HumanDelaySchema.optional(),
     timeoutSeconds: z.number().int().positive().optional(),
     mediaMaxMb: z.number().positive().optional(),
+    imageMaxDimensionPx: z.number().int().positive().optional(),
     typingIntervalSeconds: z.number().int().positive().optional(),
-    typingMode: z
-      .union([
-        z.literal("never"),
-        z.literal("instant"),
-        z.literal("thinking"),
-        z.literal("message"),
-      ])
-      .optional(),
+    typingMode: TypingModeSchema.optional(),
     heartbeat: HeartbeatSchema,
     maxConcurrent: z.number().int().positive().optional(),
     subagents: z
       .object({
         maxConcurrent: z.number().int().positive().optional(),
-        archiveAfterMinutes: z.number().int().positive().optional(),
-        model: z
-          .union([
-            z.string(),
-            z
-              .object({
-                primary: z.string().optional(),
-                fallbacks: z.array(z.string()).optional(),
-              })
-              .strict(),
-          ])
-          .optional(),
+        maxSpawnDepth: z
+          .number()
+          .int()
+          .min(1)
+          .max(5)
+          .optional()
+          .describe(
+            "Maximum nesting depth for sub-agent spawning. 1 = no nesting (default), 2 = sub-agents can spawn sub-sub-agents.",
+          ),
+        maxChildrenPerAgent: z
+          .number()
+          .int()
+          .min(1)
+          .max(20)
+          .optional()
+          .describe(
+            "Maximum number of active children a single agent session can spawn (default: 5).",
+          ),
+        archiveAfterMinutes: z.number().int().min(0).optional(),
+        model: AgentModelSchema.optional(),
         thinking: z.string().optional(),
+        runTimeoutSeconds: z.number().int().min(0).optional(),
+        announceTimeoutMs: z.number().int().positive().optional(),
       })
       .strict()
       .optional(),
-    sandbox: z
-      .object({
-        mode: z.union([z.literal("off"), z.literal("non-main"), z.literal("all")]).optional(),
-        workspaceAccess: z.union([z.literal("none"), z.literal("ro"), z.literal("rw")]).optional(),
-        sessionToolsVisibility: z.union([z.literal("spawned"), z.literal("all")]).optional(),
-        scope: z.union([z.literal("session"), z.literal("agent"), z.literal("shared")]).optional(),
-        perSession: z.boolean().optional(),
-        workspaceRoot: z.string().optional(),
-        docker: SandboxDockerSchema,
-        browser: SandboxBrowserSchema,
-        prune: SandboxPruneSchema,
-      })
-      .strict()
-      .optional(),
-    modelPolicy: z
-      .object({
-        allowCrossProviderFallback: z.boolean().optional(),
-      })
-      .strict()
-      .optional(),
+    sandbox: AgentSandboxSchema,
   })
   .strict()
   .optional();

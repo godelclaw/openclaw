@@ -1,9 +1,9 @@
 import fs from "node:fs/promises";
-import { resetAcpSessionInPlace } from "../../acp/persistent-bindings.js";
+import { resetConfiguredBindingTargetInPlace } from "../../channels/plugins/binding-targets.js";
 import { logVerbose } from "../../globals.js";
 import { createInternalHookEvent, triggerInternalHook } from "../../hooks/internal-hooks.js";
 import { getGlobalHookRunner } from "../../plugins/hook-runner-global.js";
-import { isAcpSessionKey } from "../../routing/session-key.js";
+import { isAcpSessionKey, resolveAgentIdFromSessionKey } from "../../routing/session-key.js";
 import { resolveSendPolicy } from "../../sessions/send-policy.js";
 import { shouldHandleTextCommands } from "../commands-registry.js";
 import { handleAcpCommand } from "./commands-acp.js";
@@ -12,6 +12,7 @@ import { handleAllowlistCommand } from "./commands-allowlist.js";
 import { handleApproveCommand } from "./commands-approve.js";
 import { handleMindlockCommands } from "./commands-mindlock.js";
 import { handleBashCommand } from "./commands-bash.js";
+import { handleBtwCommand } from "./commands-btw.js";
 import { handleCompactCommand } from "./commands-compact.js";
 import { handleConfigCommand, handleDebugCommand } from "./commands-config.js";
 import {
@@ -22,11 +23,14 @@ import {
   handleStatusCommand,
   handleWhoamiCommand,
 } from "./commands-info.js";
+import { handleMcpCommand } from "./commands-mcp.js";
 import { handleModelsCommand } from "./commands-models.js";
 import { handlePluginCommand } from "./commands-plugin.js";
+import { handlePluginsCommand } from "./commands-plugins.js";
 import {
   handleAbortTrigger,
   handleActivationCommand,
+  handleFastCommand,
   handleRestartCommand,
   handleSessionCommand,
   handleSendPolicyCommand,
@@ -64,6 +68,7 @@ export async function emitResetCommandHooks(params: {
     previousSessionEntry: params.previousSessionEntry,
     commandSource: params.command.surface,
     senderId: params.command.senderId,
+    workspaceDir: params.workspaceDir,
     cfg: params.cfg, // Pass config for LLM slug generation
   });
   await triggerInternalHook(hookEvent);
@@ -121,7 +126,7 @@ export async function emitResetCommandHooks(params: {
         await hookRunner.runBeforeReset(
           { sessionFile, messages, reason: params.action },
           {
-            agentId: params.sessionKey?.split(":")[0] ?? "main",
+            agentId: resolveAgentIdFromSessionKey(params.sessionKey),
             sessionKey: params.sessionKey,
             sessionId: prevEntry?.sessionId,
             workspaceDir: params.workspaceDir,
@@ -173,9 +178,11 @@ export async function handleCommands(params: HandleCommandsParams): Promise<Comm
     HANDLERS = [
       // Plugin commands are processed first, before built-in commands
       handlePluginCommand,
+      handleBtwCommand,
       handleBashCommand,
       handleActivationCommand,
       handleSendPolicyCommand,
+      handleFastCommand,
       handleUsageCommand,
       handleSessionCommand,
       handleRestartCommand,
@@ -191,6 +198,8 @@ export async function handleCommands(params: HandleCommandsParams): Promise<Comm
       handleWhoamiCommand,
       handleSubagentsCommand,
       handleAcpCommand,
+      handleMcpCommand,
+      handlePluginsCommand,
       handleConfigCommand,
       handleDebugCommand,
       handleModelsCommand,
@@ -221,7 +230,7 @@ export async function handleCommands(params: HandleCommandsParams): Promise<Comm
         ? boundAcpSessionKey.trim()
         : undefined;
     if (boundAcpKey) {
-      const resetResult = await resetAcpSessionInPlace({
+      const resetResult = await resetConfiguredBindingTargetInPlace({
         cfg: params.cfg,
         sessionKey: boundAcpKey,
         reason: commandAction,

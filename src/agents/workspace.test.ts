@@ -9,10 +9,6 @@ import {
   DEFAULT_IDENTITY_FILENAME,
   DEFAULT_MEMORY_ALT_FILENAME,
   DEFAULT_MEMORY_FILENAME,
-  LEGACY_MEMORY_ALT_FILENAME,
-  LEGACY_MEMORY_FILENAME,
-  SUPERLEGACY_MEMORY_ALT_FILENAME,
-  SUPERLEGACY_MEMORY_FILENAME,
   DEFAULT_TOOLS_FILENAME,
   DEFAULT_USER_FILENAME,
   ensureAgentWorkspace,
@@ -35,22 +31,22 @@ describe("resolveDefaultAgentWorkspaceDir", () => {
 
 const WORKSPACE_STATE_PATH_SEGMENTS = [".openclaw", "workspace-state.json"] as const;
 
-async function readOnboardingState(dir: string): Promise<{
+async function readWorkspaceState(dir: string): Promise<{
   version: number;
   bootstrapSeededAt?: string;
-  onboardingCompletedAt?: string;
+  setupCompletedAt?: string;
 }> {
   const raw = await fs.readFile(path.join(dir, ...WORKSPACE_STATE_PATH_SEGMENTS), "utf-8");
   return JSON.parse(raw) as {
     version: number;
     bootstrapSeededAt?: string;
-    onboardingCompletedAt?: string;
+    setupCompletedAt?: string;
   };
 }
 
 async function expectBootstrapSeeded(dir: string) {
   await expect(fs.access(path.join(dir, DEFAULT_BOOTSTRAP_FILENAME))).resolves.toBeUndefined();
-  const state = await readOnboardingState(dir);
+  const state = await readWorkspaceState(dir);
   expect(state.bootstrapSeededAt).toMatch(/\d{4}-\d{2}-\d{2}T/);
 }
 
@@ -59,8 +55,8 @@ async function expectCompletedWithoutBootstrap(dir: string) {
   await expect(fs.access(path.join(dir, DEFAULT_BOOTSTRAP_FILENAME))).rejects.toMatchObject({
     code: "ENOENT",
   });
-  const state = await readOnboardingState(dir);
-  expect(state.onboardingCompletedAt).toMatch(/\d{4}-\d{2}-\d{2}T/);
+  const state = await readWorkspaceState(dir);
+  expect(state.setupCompletedAt).toMatch(/\d{4}-\d{2}-\d{2}T/);
 }
 
 function expectSubagentAllowedBootstrapNames(files: WorkspaceBootstrapFile[]) {
@@ -72,12 +68,7 @@ function expectSubagentAllowedBootstrapNames(files: WorkspaceBootstrapFile[]) {
   expect(names).toContain("USER.md");
   expect(names).not.toContain("HEARTBEAT.md");
   expect(names).not.toContain("BOOTSTRAP.md");
-  expect(names).not.toContain(DEFAULT_MEMORY_FILENAME);
-  expect(names).not.toContain(DEFAULT_MEMORY_ALT_FILENAME);
-  expect(names).not.toContain(LEGACY_MEMORY_FILENAME);
-  expect(names).not.toContain(LEGACY_MEMORY_ALT_FILENAME);
-  expect(names).not.toContain(SUPERLEGACY_MEMORY_FILENAME);
-  expect(names).not.toContain(SUPERLEGACY_MEMORY_ALT_FILENAME);
+  expect(names).not.toContain("MEMORY.md");
 }
 
 describe("ensureAgentWorkspace", () => {
@@ -87,7 +78,7 @@ describe("ensureAgentWorkspace", () => {
     await ensureAgentWorkspace({ dir: tempDir, ensureBootstrapFiles: true });
 
     await expectBootstrapSeeded(tempDir);
-    expect((await readOnboardingState(tempDir)).onboardingCompletedAt).toBeUndefined();
+    expect((await readWorkspaceState(tempDir)).setupCompletedAt).toBeUndefined();
   });
 
   it("recovers partial initialization by creating BOOTSTRAP.md when marker is missing", async () => {
@@ -113,8 +104,8 @@ describe("ensureAgentWorkspace", () => {
       code: "ENOENT",
     });
     await expect(fs.access(path.join(tempDir, DEFAULT_TOOLS_FILENAME))).resolves.toBeUndefined();
-    const state = await readOnboardingState(tempDir);
-    expect(state.onboardingCompletedAt).toMatch(/\d{4}-\d{2}-\d{2}T/);
+    const state = await readWorkspaceState(tempDir);
+    expect(state.setupCompletedAt).toMatch(/\d{4}-\d{2}-\d{2}T/);
   });
 
   it("does not re-seed BOOTSTRAP.md for legacy completed workspaces without state marker", async () => {
@@ -127,16 +118,16 @@ describe("ensureAgentWorkspace", () => {
     await expect(fs.access(path.join(tempDir, DEFAULT_BOOTSTRAP_FILENAME))).rejects.toMatchObject({
       code: "ENOENT",
     });
-    const state = await readOnboardingState(tempDir);
+    const state = await readWorkspaceState(tempDir);
     expect(state.bootstrapSeededAt).toBeUndefined();
-    expect(state.onboardingCompletedAt).toMatch(/\d{4}-\d{2}-\d{2}T/);
+    expect(state.setupCompletedAt).toMatch(/\d{4}-\d{2}-\d{2}T/);
   });
 
   it("treats memory-backed workspaces as existing even when template files are missing", async () => {
     const tempDir = await makeTempWorkspace("openclaw-workspace-");
     await fs.mkdir(path.join(tempDir, "memory"), { recursive: true });
     await fs.writeFile(path.join(tempDir, "memory", "2026-02-25.md"), "# Daily log\nSome notes");
-    await fs.writeFile(path.join(tempDir, "DAILYMEMORY.md"), "# Mid-term memory\nImportant stuff");
+    await fs.writeFile(path.join(tempDir, "MEMORY.md"), "# Long-term memory\nImportant stuff");
 
     await ensureAgentWorkspace({ dir: tempDir, ensureBootstrapFiles: true });
 
@@ -144,10 +135,10 @@ describe("ensureAgentWorkspace", () => {
     await expect(fs.access(path.join(tempDir, DEFAULT_BOOTSTRAP_FILENAME))).rejects.toMatchObject({
       code: "ENOENT",
     });
-    const state = await readOnboardingState(tempDir);
-    expect(state.onboardingCompletedAt).toMatch(/\d{4}-\d{2}-\d{2}T/);
-    const memoryContent = await fs.readFile(path.join(tempDir, "DAILYMEMORY.md"), "utf-8");
-    expect(memoryContent).toBe("# Mid-term memory\nImportant stuff");
+    const state = await readWorkspaceState(tempDir);
+    expect(state.setupCompletedAt).toMatch(/\d{4}-\d{2}-\d{2}T/);
+    const memoryContent = await fs.readFile(path.join(tempDir, "MEMORY.md"), "utf-8");
+    expect(memoryContent).toBe("# Long-term memory\nImportant stuff");
   });
 
   it("treats git-backed workspaces as existing even when template files are missing", async () => {
@@ -159,19 +150,34 @@ describe("ensureAgentWorkspace", () => {
 
     await expectCompletedWithoutBootstrap(tempDir);
   });
+
+  it("migrates legacy onboardingCompletedAt markers to setupCompletedAt", async () => {
+    const tempDir = await makeTempWorkspace("openclaw-workspace-");
+    await fs.mkdir(path.join(tempDir, ".openclaw"), { recursive: true });
+    await fs.writeFile(
+      path.join(tempDir, ...WORKSPACE_STATE_PATH_SEGMENTS),
+      JSON.stringify({
+        version: 1,
+        onboardingCompletedAt: "2026-03-15T02:30:00.000Z",
+      }),
+    );
+
+    await ensureAgentWorkspace({ dir: tempDir, ensureBootstrapFiles: true });
+
+    const state = await readWorkspaceState(tempDir);
+    expect(state.setupCompletedAt).toBe("2026-03-15T02:30:00.000Z");
+    const persisted = await fs.readFile(
+      path.join(tempDir, ...WORKSPACE_STATE_PATH_SEGMENTS),
+      "utf-8",
+    );
+    expect(persisted).toContain('"setupCompletedAt": "2026-03-15T02:30:00.000Z"');
+  });
 });
 
 describe("loadWorkspaceBootstrapFiles", () => {
   const getMemoryEntries = (files: Awaited<ReturnType<typeof loadWorkspaceBootstrapFiles>>) =>
     files.filter((file) =>
-      [
-        DEFAULT_MEMORY_FILENAME,
-        DEFAULT_MEMORY_ALT_FILENAME,
-        LEGACY_MEMORY_FILENAME,
-        LEGACY_MEMORY_ALT_FILENAME,
-        SUPERLEGACY_MEMORY_FILENAME,
-        SUPERLEGACY_MEMORY_ALT_FILENAME,
-      ].includes(file.name),
+      [DEFAULT_MEMORY_FILENAME, DEFAULT_MEMORY_ALT_FILENAME].includes(file.name),
     );
 
   const expectSingleMemoryEntry = (
@@ -184,46 +190,20 @@ describe("loadWorkspaceBootstrapFiles", () => {
     expect(memoryEntries[0]?.content).toBe(content);
   };
 
-  it("includes legacy DAILYMEMORY.md when present", async () => {
+  it("includes MEMORY.md when present", async () => {
     const tempDir = await makeTempWorkspace("openclaw-workspace-");
-    await writeWorkspaceFile({ dir: tempDir, name: LEGACY_MEMORY_FILENAME, content: "daily" });
-
-    const files = await loadWorkspaceBootstrapFiles(tempDir);
-    expectSingleMemoryEntry(files, "daily");
-  });
-
-  it("includes legacy dailymemory.md when newer files are absent", async () => {
-    const tempDir = await makeTempWorkspace("openclaw-workspace-");
-    await writeWorkspaceFile({ dir: tempDir, name: LEGACY_MEMORY_ALT_FILENAME, content: "daily-alt" });
-
-    const files = await loadWorkspaceBootstrapFiles(tempDir);
-    expectSingleMemoryEntry(files, "daily-alt");
-  });
-
-  it("falls back to MEMORY.md when newer names are absent", async () => {
-    const tempDir = await makeTempWorkspace("openclaw-workspace-");
-    await writeWorkspaceFile({ dir: tempDir, name: SUPERLEGACY_MEMORY_FILENAME, content: "memory" });
+    await writeWorkspaceFile({ dir: tempDir, name: "MEMORY.md", content: "memory" });
 
     const files = await loadWorkspaceBootstrapFiles(tempDir);
     expectSingleMemoryEntry(files, "memory");
   });
 
-  it("prefers MIDTERMMEMORY.md over legacy files", async () => {
+  it("includes memory.md when MEMORY.md is absent", async () => {
     const tempDir = await makeTempWorkspace("openclaw-workspace-");
-    await writeWorkspaceFile({ dir: tempDir, name: DEFAULT_MEMORY_FILENAME, content: "midterm" });
-    await writeWorkspaceFile({ dir: tempDir, name: LEGACY_MEMORY_FILENAME, content: "daily" });
-    await writeWorkspaceFile({ dir: tempDir, name: SUPERLEGACY_MEMORY_FILENAME, content: "legacy" });
+    await writeWorkspaceFile({ dir: tempDir, name: "memory.md", content: "alt" });
 
     const files = await loadWorkspaceBootstrapFiles(tempDir);
-    expectSingleMemoryEntry(files, "midterm");
-  });
-
-  it("includes midtermmemory.md when MIDTERMMEMORY.md is absent", async () => {
-    const tempDir = await makeTempWorkspace("openclaw-workspace-");
-    await writeWorkspaceFile({ dir: tempDir, name: DEFAULT_MEMORY_ALT_FILENAME, content: "midterm-alt" });
-
-    const files = await loadWorkspaceBootstrapFiles(tempDir);
-    expectSingleMemoryEntry(files, "midterm-alt");
+    expectSingleMemoryEntry(files, "alt");
   });
 
   it("omits memory entries when no memory files exist", async () => {
@@ -274,7 +254,7 @@ describe("filterBootstrapFilesForSession", () => {
     { name: "USER.md", path: "/w/USER.md", content: "", missing: false },
     { name: "HEARTBEAT.md", path: "/w/HEARTBEAT.md", content: "", missing: false },
     { name: "BOOTSTRAP.md", path: "/w/BOOTSTRAP.md", content: "", missing: false },
-    { name: DEFAULT_MEMORY_FILENAME, path: `/w/${DEFAULT_MEMORY_FILENAME}`, content: "", missing: false },
+    { name: "MEMORY.md", path: "/w/MEMORY.md", content: "", missing: false },
   ];
 
   it("returns all files for main session (no sessionKey)", () => {

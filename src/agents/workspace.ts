@@ -29,12 +29,8 @@ export const DEFAULT_IDENTITY_FILENAME = "IDENTITY.md";
 export const DEFAULT_USER_FILENAME = "USER.md";
 export const DEFAULT_HEARTBEAT_FILENAME = "HEARTBEAT.md";
 export const DEFAULT_BOOTSTRAP_FILENAME = "BOOTSTRAP.md";
-export const DEFAULT_MEMORY_FILENAME = "MIDTERMMEMORY.md";
-export const DEFAULT_MEMORY_ALT_FILENAME = "midtermmemory.md";
-export const LEGACY_MEMORY_FILENAME = "DAILYMEMORY.md";
-export const LEGACY_MEMORY_ALT_FILENAME = "dailymemory.md";
-export const SUPERLEGACY_MEMORY_FILENAME = "MEMORY.md";
-export const SUPERLEGACY_MEMORY_ALT_FILENAME = "memory.md";
+export const DEFAULT_MEMORY_FILENAME = "MEMORY.md";
+export const DEFAULT_MEMORY_ALT_FILENAME = "memory.md";
 const WORKSPACE_STATE_DIRNAME = ".openclaw";
 const WORKSPACE_STATE_FILENAME = "workspace-state.json";
 const WORKSPACE_STATE_VERSION = 1;
@@ -142,11 +138,7 @@ export type WorkspaceBootstrapFileName =
   | typeof DEFAULT_HEARTBEAT_FILENAME
   | typeof DEFAULT_BOOTSTRAP_FILENAME
   | typeof DEFAULT_MEMORY_FILENAME
-  | typeof DEFAULT_MEMORY_ALT_FILENAME
-  | typeof LEGACY_MEMORY_FILENAME
-  | typeof LEGACY_MEMORY_ALT_FILENAME
-  | typeof SUPERLEGACY_MEMORY_FILENAME
-  | typeof SUPERLEGACY_MEMORY_ALT_FILENAME;
+  | typeof DEFAULT_MEMORY_ALT_FILENAME;
 
 export type WorkspaceBootstrapFile = {
   name: WorkspaceBootstrapFileName;
@@ -167,10 +159,10 @@ export type ExtraBootstrapLoadDiagnostic = {
   detail: string;
 };
 
-type WorkspaceOnboardingState = {
+type WorkspaceSetupState = {
   version: typeof WORKSPACE_STATE_VERSION;
   bootstrapSeededAt?: string;
-  onboardingCompletedAt?: string;
+  setupCompletedAt?: string;
 };
 
 /** Set of recognized bootstrap filenames for runtime validation */
@@ -184,10 +176,6 @@ const VALID_BOOTSTRAP_NAMES: ReadonlySet<string> = new Set([
   DEFAULT_BOOTSTRAP_FILENAME,
   DEFAULT_MEMORY_FILENAME,
   DEFAULT_MEMORY_ALT_FILENAME,
-  LEGACY_MEMORY_FILENAME,
-  LEGACY_MEMORY_ALT_FILENAME,
-  SUPERLEGACY_MEMORY_FILENAME,
-  SUPERLEGACY_MEMORY_ALT_FILENAME,
 ]);
 
 async function writeFileIfMissing(filePath: string, content: string): Promise<boolean> {
@@ -219,35 +207,43 @@ function resolveWorkspaceStatePath(dir: string): string {
   return path.join(dir, WORKSPACE_STATE_DIRNAME, WORKSPACE_STATE_FILENAME);
 }
 
-function parseWorkspaceOnboardingState(raw: string): WorkspaceOnboardingState | null {
+function parseWorkspaceSetupState(raw: string): WorkspaceSetupState | null {
   try {
     const parsed = JSON.parse(raw) as {
       bootstrapSeededAt?: unknown;
+      setupCompletedAt?: unknown;
       onboardingCompletedAt?: unknown;
     };
     if (!parsed || typeof parsed !== "object") {
       return null;
     }
+    const legacyCompletedAt =
+      typeof parsed.onboardingCompletedAt === "string" ? parsed.onboardingCompletedAt : undefined;
     return {
       version: WORKSPACE_STATE_VERSION,
       bootstrapSeededAt:
         typeof parsed.bootstrapSeededAt === "string" ? parsed.bootstrapSeededAt : undefined,
-      onboardingCompletedAt:
-        typeof parsed.onboardingCompletedAt === "string" ? parsed.onboardingCompletedAt : undefined,
+      setupCompletedAt:
+        typeof parsed.setupCompletedAt === "string" ? parsed.setupCompletedAt : legacyCompletedAt,
     };
   } catch {
     return null;
   }
 }
 
-async function readWorkspaceOnboardingState(statePath: string): Promise<WorkspaceOnboardingState> {
+async function readWorkspaceSetupState(statePath: string): Promise<WorkspaceSetupState> {
   try {
     const raw = await fs.readFile(statePath, "utf-8");
-    return (
-      parseWorkspaceOnboardingState(raw) ?? {
-        version: WORKSPACE_STATE_VERSION,
-      }
-    );
+    const parsed = parseWorkspaceSetupState(raw);
+    if (
+      parsed &&
+      raw.includes('"onboardingCompletedAt"') &&
+      !raw.includes('"setupCompletedAt"') &&
+      parsed.setupCompletedAt
+    ) {
+      await writeWorkspaceSetupState(statePath, parsed);
+    }
+    return parsed ?? { version: WORKSPACE_STATE_VERSION };
   } catch (err) {
     const anyErr = err as { code?: string };
     if (anyErr.code !== "ENOENT") {
@@ -259,21 +255,19 @@ async function readWorkspaceOnboardingState(statePath: string): Promise<Workspac
   }
 }
 
-async function readWorkspaceOnboardingStateForDir(dir: string): Promise<WorkspaceOnboardingState> {
+async function readWorkspaceSetupStateForDir(dir: string): Promise<WorkspaceSetupState> {
   const statePath = resolveWorkspaceStatePath(resolveUserPath(dir));
-  return await readWorkspaceOnboardingState(statePath);
+  return await readWorkspaceSetupState(statePath);
 }
 
-export async function isWorkspaceOnboardingCompleted(dir: string): Promise<boolean> {
-  const state = await readWorkspaceOnboardingStateForDir(dir);
-  return (
-    typeof state.onboardingCompletedAt === "string" && state.onboardingCompletedAt.trim().length > 0
-  );
+export async function isWorkspaceSetupCompleted(dir: string): Promise<boolean> {
+  const state = await readWorkspaceSetupStateForDir(dir);
+  return typeof state.setupCompletedAt === "string" && state.setupCompletedAt.trim().length > 0;
 }
 
-async function writeWorkspaceOnboardingState(
+async function writeWorkspaceSetupState(
   statePath: string,
-  state: WorkspaceOnboardingState,
+  state: WorkspaceSetupState,
 ): Promise<void> {
   await fs.mkdir(path.dirname(statePath), { recursive: true });
   const payload = `${JSON.stringify(state, null, 2)}\n`;
@@ -365,11 +359,6 @@ export async function ensureAgentWorkspace(params?: {
     const userContentPaths = [
       path.join(dir, "memory"),
       path.join(dir, DEFAULT_MEMORY_FILENAME),
-      path.join(dir, DEFAULT_MEMORY_ALT_FILENAME),
-      path.join(dir, LEGACY_MEMORY_FILENAME),
-      path.join(dir, LEGACY_MEMORY_ALT_FILENAME),
-      path.join(dir, SUPERLEGACY_MEMORY_FILENAME),
-      path.join(dir, SUPERLEGACY_MEMORY_ALT_FILENAME),
       path.join(dir, ".git"),
     ];
     const paths = [...templatePaths, ...userContentPaths];
@@ -399,9 +388,9 @@ export async function ensureAgentWorkspace(params?: {
   await writeFileIfMissing(userPath, userTemplate);
   await writeFileIfMissing(heartbeatPath, heartbeatTemplate);
 
-  let state = await readWorkspaceOnboardingState(statePath);
+  let state = await readWorkspaceSetupState(statePath);
   let stateDirty = false;
-  const markState = (next: Partial<WorkspaceOnboardingState>) => {
+  const markState = (next: Partial<WorkspaceSetupState>) => {
     state = { ...state, ...next };
     stateDirty = true;
   };
@@ -412,14 +401,14 @@ export async function ensureAgentWorkspace(params?: {
     markState({ bootstrapSeededAt: nowIso() });
   }
 
-  if (!state.onboardingCompletedAt && state.bootstrapSeededAt && !bootstrapExists) {
-    markState({ onboardingCompletedAt: nowIso() });
+  if (!state.setupCompletedAt && state.bootstrapSeededAt && !bootstrapExists) {
+    markState({ setupCompletedAt: nowIso() });
   }
 
-  if (!state.bootstrapSeededAt && !state.onboardingCompletedAt && !bootstrapExists) {
+  if (!state.bootstrapSeededAt && !state.setupCompletedAt && !bootstrapExists) {
     // Legacy migration path: if USER/IDENTITY diverged from templates, or if user-content
-    // indicators exist, treat onboarding as complete and avoid recreating BOOTSTRAP for
-    // already-onboarded workspaces.
+    // indicators exist, treat setup as complete and avoid recreating BOOTSTRAP for
+    // already-configured workspaces.
     const [identityContent, userContent] = await Promise.all([
       fs.readFile(identityPath, "utf-8"),
       fs.readFile(userPath, "utf-8"),
@@ -428,11 +417,6 @@ export async function ensureAgentWorkspace(params?: {
       const indicators = [
         path.join(dir, "memory"),
         path.join(dir, DEFAULT_MEMORY_FILENAME),
-        path.join(dir, DEFAULT_MEMORY_ALT_FILENAME),
-        path.join(dir, LEGACY_MEMORY_FILENAME),
-        path.join(dir, LEGACY_MEMORY_ALT_FILENAME),
-        path.join(dir, SUPERLEGACY_MEMORY_FILENAME),
-        path.join(dir, SUPERLEGACY_MEMORY_ALT_FILENAME),
         path.join(dir, ".git"),
       ];
       for (const indicator of indicators) {
@@ -445,10 +429,10 @@ export async function ensureAgentWorkspace(params?: {
       }
       return false;
     })();
-    const legacyOnboardingCompleted =
+    const legacySetupCompleted =
       identityContent !== identityTemplate || userContent !== userTemplate || hasUserContent;
-    if (legacyOnboardingCompleted) {
-      markState({ onboardingCompletedAt: nowIso() });
+    if (legacySetupCompleted) {
+      markState({ setupCompletedAt: nowIso() });
     } else {
       const bootstrapTemplate = await loadTemplate(DEFAULT_BOOTSTRAP_FILENAME);
       const wroteBootstrap = await writeFileIfMissing(bootstrapPath, bootstrapTemplate);
@@ -464,7 +448,7 @@ export async function ensureAgentWorkspace(params?: {
   }
 
   if (stateDirty) {
-    await writeWorkspaceOnboardingState(statePath, state);
+    await writeWorkspaceSetupState(statePath, state);
   }
   await ensureGitRepo(dir, isBrandNewWorkspace);
 
@@ -480,37 +464,24 @@ export async function ensureAgentWorkspace(params?: {
   };
 }
 
-async function resolveMemoryBootstrapEntries(
+async function resolveMemoryBootstrapEntry(
   resolvedDir: string,
-): Promise<Array<{ name: WorkspaceBootstrapFileName; filePath: string }>> {
-  const candidates: WorkspaceBootstrapFileName[] = [
-    DEFAULT_MEMORY_FILENAME,
-    DEFAULT_MEMORY_ALT_FILENAME,
-    LEGACY_MEMORY_FILENAME,
-    LEGACY_MEMORY_ALT_FILENAME,
-    SUPERLEGACY_MEMORY_FILENAME,
-    SUPERLEGACY_MEMORY_ALT_FILENAME,
-  ];
-  const seen = new Set<string>();
-  for (const name of candidates) {
+): Promise<{ name: WorkspaceBootstrapFileName; filePath: string } | null> {
+  // Prefer MEMORY.md; fall back to memory.md only when absent.
+  // Checking both and deduplicating via realpath is unreliable on case-insensitive
+  // file systems mounted in Docker (e.g. macOS volumes), where both names pass
+  // fs.access() but realpath does not normalise case through the mount layer,
+  // causing the same content to be injected twice and wasting tokens.
+  for (const name of [DEFAULT_MEMORY_FILENAME, DEFAULT_MEMORY_ALT_FILENAME] as const) {
     const filePath = path.join(resolvedDir, name);
     try {
       await fs.access(filePath);
-      let key = filePath;
-      try {
-        key = await fs.realpath(filePath);
-      } catch {
-        // keep original path key when realpath is unavailable
-      }
-      if (seen.has(key)) {
-        continue;
-      }
-      return [{ name, filePath }];
+      return { name, filePath };
     } catch {
-      // optional
+      // try next candidate
     }
   }
-  return [];
+  return null;
 }
 
 export async function loadWorkspaceBootstrapFiles(dir: string): Promise<WorkspaceBootstrapFile[]> {
@@ -550,7 +521,10 @@ export async function loadWorkspaceBootstrapFiles(dir: string): Promise<Workspac
     },
   ];
 
-  entries.push(...(await resolveMemoryBootstrapEntries(resolvedDir)));
+  const memoryEntry = await resolveMemoryBootstrapEntry(resolvedDir);
+  if (memoryEntry) {
+    entries.push(memoryEntry);
+  }
 
   const result: WorkspaceBootstrapFile[] = [];
   for (const entry of entries) {

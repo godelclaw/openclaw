@@ -1,14 +1,10 @@
-import fs from "node:fs/promises";
-import os from "node:os";
-import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
-  applyRepoStateDirFallback,
-  detectRepoStateDirFromCwd,
   rewriteUpdateFlagArgv,
   shouldEnsureCliPath,
   shouldRegisterPrimarySubcommand,
   shouldSkipPluginCommandRegistration,
+  shouldUseRootHelpFastPath,
 } from "./run-main.js";
 
 describe("rewriteUpdateFlagArgv", () => {
@@ -132,48 +128,11 @@ describe("shouldEnsureCliPath", () => {
   });
 });
 
-describe("repo state dir fallback", () => {
-  async function withTempRoot(prefix: string, run: (root: string) => Promise<void>): Promise<void> {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
-    try {
-      await run(root);
-    } finally {
-      await fs.rm(root, { recursive: true, force: true });
-    }
-  }
-
-  it("detects the nearest repo-local .BGIseed-state from a nested cwd", async () => {
-    await withTempRoot("openclaw-repo-state-", async (root) => {
-      const nested = path.join(root, "src", "cli");
-      await fs.mkdir(path.join(root, ".BGIseed-state"), { recursive: true });
-      await fs.mkdir(nested, { recursive: true });
-      await fs.writeFile(path.join(root, ".BGIseed-state", "openclaw.json"), "{}", "utf-8");
-
-      expect(detectRepoStateDirFromCwd(nested)).toBe(path.join(root, ".BGIseed-state"));
-    });
-  });
-
-  it("sets OPENCLAW_STATE_DIR when repo state exists and no explicit override is present", async () => {
-    await withTempRoot("openclaw-repo-state-", async (root) => {
-      await fs.mkdir(path.join(root, ".BGIseed-state"), { recursive: true });
-      await fs.writeFile(path.join(root, ".BGIseed-state", "openclaw.json"), "{}", "utf-8");
-
-      const env = {} as NodeJS.ProcessEnv;
-      expect(applyRepoStateDirFallback(env, root)).toBe(path.join(root, ".BGIseed-state"));
-      expect(env.OPENCLAW_STATE_DIR).toBe(path.join(root, ".BGIseed-state"));
-    });
-  });
-
-  it("keeps explicit state/config/home overrides authoritative", () => {
-    const stateDir = "/explicit/state";
-    expect(
-      applyRepoStateDirFallback({ OPENCLAW_STATE_DIR: stateDir } as NodeJS.ProcessEnv, "/tmp"),
-    ).toBeNull();
-    expect(
-      applyRepoStateDirFallback({ OPENCLAW_CONFIG_PATH: "/explicit/openclaw.json" } as NodeJS.ProcessEnv, "/tmp"),
-    ).toBeNull();
-    expect(
-      applyRepoStateDirFallback({ OPENCLAW_HOME: "/explicit/home" } as NodeJS.ProcessEnv, "/tmp"),
-    ).toBeNull();
+describe("shouldUseRootHelpFastPath", () => {
+  it("uses the fast path for root help only", () => {
+    expect(shouldUseRootHelpFastPath(["node", "openclaw", "--help"])).toBe(true);
+    expect(shouldUseRootHelpFastPath(["node", "openclaw", "--profile", "work", "-h"])).toBe(true);
+    expect(shouldUseRootHelpFastPath(["node", "openclaw", "status", "--help"])).toBe(false);
+    expect(shouldUseRootHelpFastPath(["node", "openclaw", "--help", "status"])).toBe(false);
   });
 });

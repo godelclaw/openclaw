@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import type { ImageContent } from "../agents/command/types.js";
 import { createDefaultDeps } from "../cli/deps.js";
 import { agentCommandFromIngress } from "../commands/agent.js";
-import type { ImageContent } from "../commands/agent/types.js";
 import type { GatewayHttpChatCompletionsConfig } from "../config/types.gateway.js";
 import { emitAgentEvent, onAgentEvent } from "../infra/agent-events.js";
 import { logWarn } from "../logger.js";
@@ -28,6 +28,7 @@ import type { ResolvedGatewayAuth } from "./auth.js";
 import { sendJson, setSseHeaders, writeDone } from "./http-common.js";
 import { handleGatewayPostJsonEndpoint } from "./http-endpoint-helpers.js";
 import { resolveGatewayRequestContext } from "./http-utils.js";
+import { normalizeInputHostnameAllowlist } from "./input-allowlist.js";
 
 type OpenAiHttpOptions = {
   auth: ResolvedGatewayAuth;
@@ -70,14 +71,6 @@ type ResolvedOpenAiChatCompletionsLimits = {
   images: InputImageLimits;
 };
 
-function normalizeHostnameAllowlist(values: string[] | undefined): string[] | undefined {
-  if (!values || values.length === 0) {
-    return undefined;
-  }
-  const normalized = values.map((value) => value.trim()).filter((value) => value.length > 0);
-  return normalized.length > 0 ? normalized : undefined;
-}
-
 function resolveOpenAiChatCompletionsLimits(
   config: GatewayHttpChatCompletionsConfig | undefined,
 ): ResolvedOpenAiChatCompletionsLimits {
@@ -94,7 +87,7 @@ function resolveOpenAiChatCompletionsLimits(
         : DEFAULT_OPENAI_MAX_TOTAL_IMAGE_BYTES,
     images: {
       allowUrl: imageConfig?.allowUrl ?? DEFAULT_OPENAI_IMAGE_LIMITS.allowUrl,
-      urlAllowlist: normalizeHostnameAllowlist(imageConfig?.urlAllowlist),
+      urlAllowlist: normalizeInputHostnameAllowlist(imageConfig?.urlAllowlist),
       allowedMimes: normalizeMimeList(imageConfig?.allowedMimes, DEFAULT_INPUT_IMAGE_MIMES),
       maxBytes: imageConfig?.maxBytes ?? DEFAULT_INPUT_IMAGE_MAX_BYTES,
       maxRedirects: imageConfig?.maxRedirects ?? DEFAULT_INPUT_MAX_REDIRECTS,
@@ -124,6 +117,7 @@ function buildAgentCommandInput(params: {
     bestEffortDeliver: false as const,
     // HTTP API callers are authenticated operator clients for this gateway context.
     senderIsOwner: true as const,
+    allowModelOverride: true as const,
   };
 }
 
@@ -300,18 +294,16 @@ async function resolveImagesForRequest(
   for (const url of urls) {
     const source = parseImageUrlToSource(url);
     if (source.type === "base64") {
-      totalBytes += estimateBase64DecodedBytes(source.data);
-      if (totalBytes > limits.maxTotalImageBytes) {
+      const sourceBytes = estimateBase64DecodedBytes(source.data);
+      if (totalBytes + sourceBytes > limits.maxTotalImageBytes) {
         throw new Error(
-          `Total image payload too large (${totalBytes}; limit ${limits.maxTotalImageBytes})`,
+          `Total image payload too large (${totalBytes + sourceBytes}; limit ${limits.maxTotalImageBytes})`,
         );
       }
     }
 
     const image = await extractImageContentFromSource(source, limits.images);
-    if (source.type !== "base64") {
-      totalBytes += estimateBase64DecodedBytes(image.data);
-    }
+    totalBytes += estimateBase64DecodedBytes(image.data);
     if (totalBytes > limits.maxTotalImageBytes) {
       throw new Error(
         `Total image payload too large (${totalBytes}; limit ${limits.maxTotalImageBytes})`,
@@ -321,6 +313,11 @@ async function resolveImagesForRequest(
   }
   return images;
 }
+
+export const __testOnlyOpenAiHttp = {
+  resolveImagesForRequest,
+  resolveOpenAiChatCompletionsLimits,
+};
 
 function buildAgentPrompt(
   messagesUnknown: unknown,
