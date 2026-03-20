@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { Message, ReactionTypeEmoji } from "@grammyjs/types";
+import JSON5 from "json5";
 import {
   resolveAgentConfig,
   resolveAgentDir,
@@ -8,6 +9,7 @@ import {
   resolveAgentWorkspaceDir,
   resolveDefaultAgentId,
 } from "../agents/agent-scope.js";
+import { parseModelRef } from "../agents/model-selection.js";
 import { hasControlCommand } from "../auto-reply/command-detection.js";
 import {
   createInboundDebouncer,
@@ -19,7 +21,30 @@ import {
   formatModelsAvailableHeader,
 } from "../auto-reply/reply/commands-models.js";
 import { resolveStoredModelOverride } from "../auto-reply/reply/model-selection.js";
+import { listSkillCommandsForAgents } from "../auto-reply/skill-commands.js";
+import { buildCommandsMessagePaginated } from "../auto-reply/status.js";
+import { shouldDebounceTextInbound } from "../channels/inbound-debounce-policy.js";
+import { resolveChannelConfigWrites } from "../channels/plugins/config-writes.js";
+import { loadConfig, resolveStateDir, type OpenClawConfig } from "../config/config.js";
+import { clearConfigCache, writeConfigFile } from "../config/io.js";
+import { loadSessionStore, resolveStorePath, updateSessionStore } from "../config/sessions.js";
 import { resolveAgentMainSessionKey } from "../config/sessions/main-session.js";
+import type { DmPolicy } from "../config/types.base.js";
+import type {
+  TelegramDirectConfig,
+  TelegramGroupConfig,
+  TelegramTopicConfig,
+} from "../config/types.js";
+import { danger, logVerbose, warn } from "../globals.js";
+import {
+  readLastHeartbeatAudit,
+  resolveHeartbeatAuditPaths,
+  type HeartbeatAuditEntry,
+} from "../infra/heartbeat-audit-log.js";
+import {
+  formatModelResolutionStatusLine,
+  readLastModelResolution,
+} from "../infra/model-resolution-log.js";
 import {
   DEFAULT_HEARTBEAT_RECENT_TURN_LIMIT,
   DEFAULT_HEARTBEAT_TRACE_LIMIT,
@@ -33,35 +58,12 @@ import {
   renderRecentTurnsBlock,
   selectRecentTurns,
 } from "../infra/recent-turn-window.js";
-import { listSkillCommandsForAgents } from "../auto-reply/skill-commands.js";
-import { buildCommandsMessagePaginated } from "../auto-reply/status.js";
-import { shouldDebounceTextInbound } from "../channels/inbound-debounce-policy.js";
-import { resolveChannelConfigWrites } from "../channels/plugins/config-writes.js";
-import JSON5 from "json5";
-import { loadConfig, resolveStateDir, type OpenClawConfig } from "../config/config.js";
-import { clearConfigCache, writeConfigFile } from "../config/io.js";
-import { loadSessionStore, resolveStorePath } from "../config/sessions.js";
-import type { DmPolicy } from "../config/types.base.js";
-import type {
-  TelegramDirectConfig,
-  TelegramGroupConfig,
-  TelegramTopicConfig,
-} from "../config/types.js";
-import { danger, logVerbose, warn } from "../globals.js";
-import {
-  formatModelResolutionStatusLine,
-  readLastModelResolution,
-} from "../infra/model-resolution-log.js";
-import {
-  readLastHeartbeatAudit,
-  resolveHeartbeatAuditPaths,
-  type HeartbeatAuditEntry,
-} from "../infra/heartbeat-audit-log.js";
 import { enqueueSystemEvent } from "../infra/system-events.js";
 import { MediaFetchError } from "../media/fetch.js";
 import { readChannelAllowFromStore } from "../pairing/pairing-store.js";
 import { resolveAgentRoute } from "../routing/resolve-route.js";
 import { resolveThreadSessionKeys } from "../routing/session-key.js";
+import { applyModelOverrideToSessionEntry } from "../sessions/model-overrides.js";
 import {
   runVeriCoreMemoryQuery,
   runVeriCoreMemoryRefine,
@@ -245,10 +247,19 @@ function parseMemorySessionsAction(text?: string): string {
   if (firstSpace < 0) {
     return "status";
   }
-  const arg = body.slice(firstSpace + 1).trim().toLowerCase();
-  if (arg === "on" || arg === "enable") return "on";
-  if (arg === "off" || arg === "disable") return "off";
-  if (arg === "toggle") return "toggle";
+  const arg = body
+    .slice(firstSpace + 1)
+    .trim()
+    .toLowerCase();
+  if (arg === "on" || arg === "enable") {
+    return "on";
+  }
+  if (arg === "off" || arg === "disable") {
+    return "off";
+  }
+  if (arg === "toggle") {
+    return "toggle";
+  }
   return "status";
 }
 
@@ -263,10 +274,11 @@ function resolveMemorySessionsState(cfg: OpenClawConfig = loadConfig()): {
   const memorySearch = defaults?.memorySearch as Record<string, unknown> | undefined;
   const experimental = memorySearch?.experimental as Record<string, unknown> | undefined;
   const sessionMemory = experimental?.sessionMemory === true;
-  const rawSources = Array.isArray(memorySearch?.sources) ? memorySearch.sources as string[] : ["memory"];
-  const sources = sessionMemory && !rawSources.includes("sessions")
-    ? [...rawSources, "sessions"]
-    : rawSources;
+  const rawSources = Array.isArray(memorySearch?.sources)
+    ? (memorySearch.sources as string[])
+    : ["memory"];
+  const sources =
+    sessionMemory && !rawSources.includes("sessions") ? [...rawSources, "sessions"] : rawSources;
   return { enabled: sessionMemory, sources };
 }
 
@@ -275,7 +287,7 @@ async function setMemorySessionsEnabled(stateDir: string, enabled: boolean): Pro
   let existing: Record<string, unknown> = {};
   try {
     const raw = await fs.readFile(overridePath, "utf-8");
-    existing = JSON5.parse(raw) as Record<string, unknown>;
+    existing = JSON5.parse(raw);
     if (typeof existing !== "object" || existing === null || Array.isArray(existing)) {
       existing = {};
     }
@@ -292,7 +304,9 @@ async function setMemorySessionsEnabled(stateDir: string, enabled: boolean): Pro
   }
   const defaults = agents.defaults as Record<string, unknown>;
   const prevMemorySearch =
-    defaults.memorySearch && typeof defaults.memorySearch === "object" && !Array.isArray(defaults.memorySearch)
+    defaults.memorySearch &&
+    typeof defaults.memorySearch === "object" &&
+    !Array.isArray(defaults.memorySearch)
       ? (defaults.memorySearch as Record<string, unknown>)
       : {};
   const prevExperimental =
@@ -772,8 +786,7 @@ export function extractVeriCoreContentFromMessage(msg: Message): string {
 `
       : "";
     const replyLabel = replyTarget.kind === "quote" ? "Quoting" : "Replying to";
-    const replyBody =
-      replyTarget.kind === "quote" ? `"${replyTarget.body}"` : replyTarget.body;
+    const replyBody = replyTarget.kind === "quote" ? `"${replyTarget.body}"` : replyTarget.body;
     parts.push(
       `[${replyLabel} ${replyTarget.sender}${replyTarget.id ? ` id:${replyTarget.id}` : ""}]
 ${replyForwardAnnotation}${replyBody}
@@ -1180,7 +1193,11 @@ export const registerTelegramHandlers = ({
       }
 
       try {
-        const result = await runVeriCoreMindlockApprove(parsed.artifactId, stimulusInput, parsed.reason);
+        const result = await runVeriCoreMindlockApprove(
+          parsed.artifactId,
+          stimulusInput,
+          parsed.reason,
+        );
         await sendVeriCoreDriverResponse(msg, formatMindlockDecisionMessage(result));
         return true;
       } catch (err) {
@@ -1201,7 +1218,11 @@ export const registerTelegramHandlers = ({
     }
 
     try {
-      const result = await runVeriCoreMindlockReject(parsed.artifactId, stimulusInput, parsed.reason);
+      const result = await runVeriCoreMindlockReject(
+        parsed.artifactId,
+        stimulusInput,
+        parsed.reason,
+      );
       await sendVeriCoreDriverResponse(msg, formatMindlockDecisionMessage(result));
       return true;
     } catch (err) {
@@ -1278,6 +1299,60 @@ export const registerTelegramHandlers = ({
         } catch (err) {
           runtime.error?.(warn(`/models fast-path error: ${String(err)}`));
           await sendVeriCoreDriverResponse(params.msg, "Failed to load models.");
+        }
+        return;
+      }
+    }
+
+    // Fast-path: /model -- show current or switch model without LLM turn.
+    {
+      const text = (params.msg.text ?? params.msg.caption ?? "").trim();
+      const modelMatch = /^\/model(?:\s|$|@)/i.test(text) && !/^\/models(?:\s|$|@)/i.test(text);
+      if (modelMatch) {
+        try {
+          const arg = text.replace(/^\/model(?:@\S+)?\s*/i, "").trim();
+          const agentId = resolveDefaultAgentId(cfg);
+          const baseSessionKey = resolveAgentMainSessionKey({ cfg, agentId });
+          const storePath = resolveStorePath(cfg.session?.store, { agentId });
+
+          if (!arg || arg === "status") {
+            // Show current model
+            const store = loadSessionStore(storePath);
+            const entry = store[baseSessionKey];
+            const currentProvider = entry?.providerOverride ?? entry?.modelProvider ?? "";
+            const currentModel = entry?.modelOverride ?? entry?.model ?? "";
+            const current =
+              currentProvider && currentModel
+                ? `${currentProvider}/${currentModel}`
+                : ((cfg.agents?.defaults?.model as { primary?: string })?.primary ?? "default");
+            await sendVeriCoreDriverResponse(
+              params.msg,
+              `Current: ${current}\nTap below to browse models, or use:\n/model <provider/model> to switch\n/model status for details`,
+            );
+          } else {
+            // Switch model
+            const parsed = parseModelRef(arg, "anthropic");
+            if (!parsed) {
+              await sendVeriCoreDriverResponse(params.msg, `Could not parse model: ${arg}`);
+            } else {
+              await updateSessionStore(storePath, (store) => {
+                if (!store[baseSessionKey]) {
+                  store[baseSessionKey] = { updatedAt: Date.now() };
+                }
+                applyModelOverrideToSessionEntry({
+                  entry: store[baseSessionKey],
+                  selection: { provider: parsed.provider, model: parsed.model },
+                });
+              });
+              await sendVeriCoreDriverResponse(
+                params.msg,
+                `Switched to ${parsed.provider}/${parsed.model}`,
+              );
+            }
+          }
+        } catch (err) {
+          runtime.error?.(warn(`/model fast-path error: ${String(err)}`));
+          await sendVeriCoreDriverResponse(params.msg, `Model switch failed: ${String(err)}`);
         }
         return;
       }
@@ -1411,18 +1486,14 @@ export const registerTelegramHandlers = ({
             return;
           }
           const currentState = resolveMemorySessionsState();
-          const desiredEnabled =
-            action === "toggle" ? !currentState.enabled : action === "on";
+          const desiredEnabled = action === "toggle" ? !currentState.enabled : action === "on";
           await setMemorySessionsEnabled(stateDir, desiredEnabled);
           const nextState = resolveMemorySessionsState();
           await sendVeriCoreDriverResponse(
             params.msg,
             (desiredEnabled ? "Enabled" : "Disabled") +
               " transcript/session memory.\n" +
-              formatMemorySessionsStatusMessage(
-                nextState.enabled,
-                nextState.sources,
-              ) +
+              formatMemorySessionsStatusMessage(nextState.enabled, nextState.sources) +
               "\n\nTakes effect on next config reload (next message or heartbeat).",
           );
           return;
@@ -2689,26 +2760,28 @@ export const registerTelegramHandlers = ({
             );
             return;
           }
-          // Process model selection as a synthetic message with /model command
-          const syntheticMessage = buildSyntheticTextMessage({
-            base: callbackMessage,
-            from: callback.from,
-            text: `/model ${selection.provider}/${selection.model}`,
-          });
-          await handleIngressWithVeriCore({
-            msg: syntheticMessage,
-            onFallback: async () => {
-              await processMessage(
-                buildSyntheticContext(ctx, syntheticMessage),
-                [],
-                storeAllowFrom,
-                {
-                  forceWasMentioned: true,
-                  messageIdOverride: callback.id,
-                },
-              );
-            },
-          });
+          // Fast-path: apply model selection directly without LLM turn.
+          try {
+            const agentId = resolveDefaultAgentId(cfg);
+            const baseSessionKey = resolveAgentMainSessionKey({ cfg, agentId });
+            const storePath = resolveStorePath(cfg.session?.store, { agentId });
+            await updateSessionStore(storePath, (store) => {
+              if (!store[baseSessionKey]) {
+                store[baseSessionKey] = { updatedAt: Date.now() };
+              }
+              applyModelOverrideToSessionEntry({
+                entry: store[baseSessionKey],
+                selection: { provider: selection.provider, model: selection.model },
+              });
+            });
+            await editMessageWithButtons(
+              `Switched to ${selection.provider}/${selection.model}`,
+              [],
+            );
+          } catch (err) {
+            runtime.error?.(warn(`model callback fast-path error: ${String(err)}`));
+            await editMessageWithButtons(`Model switch failed: ${String(err)}`, []);
+          }
           return;
         }
 
